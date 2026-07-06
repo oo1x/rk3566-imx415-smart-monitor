@@ -1506,7 +1506,7 @@ MODULE_AUTHOR("oo1");
 MODULE_DESCRIPTION("My IMX415 camera driver for learning, closer to Rockchip original");
 
 
-// // yusnhiqudong1
+// // Orignal Driver
 // #define DEBUG
 // #include <linux/clk.h>
 // #include <linux/device.h>
