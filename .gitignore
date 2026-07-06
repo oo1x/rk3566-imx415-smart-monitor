@@ -1,0 +1,15 @@
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.swp
+*.swo
+*.swn
+*.log
+imx415_rtsp
+imx415_yolo_rtsp
+demo
+BarbieGirl.*
+obj/
+build/

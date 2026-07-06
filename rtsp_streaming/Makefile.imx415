@@ -1,0 +1,42 @@
+# IMX415 RTSP推流 Makefile
+# Ubuntu交叉编译：make -f Makefile.imx415
+# 板子上直接编译：make -f Makefile.imx415 CROSS= SYSROOT=
+
+CROSS   ?= aarch64-linux-gnu-
+CC      = $(CROSS)gcc
+STRIP   = $(CROSS)strip
+
+SYSROOT = /home/oo1/Desktop/Lubancat_kernel/debian/binary
+MPP_INC = $(SYSROOT)/usr/include/rockchip
+MPP_LIB = $(SYSROOT)/usr/lib/aarch64-linux-gnu
+
+CFLAGS  = -g -Wall -O2 -D__LINUX__ --sysroot=$(SYSROOT)
+LDFLAGS = --sysroot=$(SYSROOT) \
+          -L$(MPP_LIB) \
+          -lrockchip_mpp \
+          -lrt \
+          -l:libpthread.so.0
+
+RTSP_SRCS = rtsp_demo.c rtsp_msg.c rtp_enc.c stream_queue.c utils.c
+
+SRCS = imx415_rtsp.c \
+       v4l2_capture.c \
+       mpp_encoder.c \
+       $(RTSP_SRCS)
+
+OBJS = $(SRCS:.c=.o)
+TAR  = imx415_rtsp
+
+all: $(TAR)
+
+$(TAR): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Build OK: $(TAR)"
+
+%.o: %.c
+	$(CC) $(CFLAGS) -I$(MPP_INC) -c $< -o $@
+
+clean:
+	rm -f $(OBJS) $(TAR)
+
+.PHONY: all clean
