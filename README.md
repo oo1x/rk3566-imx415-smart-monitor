@@ -206,6 +206,14 @@ docs/PROJECT_REPORT.md
 
 其中包含驱动链路、V4L2 采集、YOLO11n 部署、RGA、MPP、RTSP、多线程优化、DMA-BUF、NPU 频率、量化说明、测试验证和简历表述建议。
 
+代码模块讲解与流程图见：
+
+```text
+docs/CODE_WALKTHROUGH.md
+```
+
+其中按 Sensor 驱动、设备树、V4L2 采集、YOLO 端侧部署、MPP 编码、RTSP 推流和低延迟优化拆分说明每部分做了什么、对应哪些代码、面试时应该怎么讲。
+
 ## 后续方向
 
 - 更换 5V3A 电源，验证 NPU 900 MHz 满频性能。
@@ -214,4 +222,3 @@ docs/PROJECT_REPORT.md
 - 评估 YOLOv5n / YOLOv6n 在 RK3566 上的推理性能。
 - 使用真实监控画面重新做 INT8 calibration。
 - 进一步探索 RGA blit 到编码 DMA-BUF，减少 CPU 整帧拷贝。
-
