@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 #include "im2d.h"
 #include "drmrga.h"
