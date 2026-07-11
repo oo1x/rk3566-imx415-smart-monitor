@@ -21,8 +21,7 @@ extern "C" {
 #include "yolo11.h"
 #include "image_utils.h"
 #include "image_drawing.h"
-#include "im2d.h"
-#include "drmrga.h"
+#include "rga_overlay_helper.h"
 
 #define BOUNDARY_Y      540
 #define RKNN_MODEL_PATH "/mnt/nfs/rknn_yolo11_demo/model/yolo11.rknn"
@@ -192,12 +191,14 @@ typedef struct {
     int enabled;
     int width;
     int height;
-    int format;
-#if defined(LIBRGA_IM2D_HANDLE)
-    rga_buffer_handle_t handles[BUF_COUNT];
-    rga_buffer_t buffers[BUF_COUNT];
-#endif
 } rga_overlay_ctx_t;
+
+typedef struct {
+    int x;
+    int y;
+    int width;
+    int height;
+} overlay_rect_t;
 
 typedef struct {
     v4l2_ctx_t *v4l2;
@@ -280,45 +281,17 @@ static void rga_overlay_init(rga_overlay_ctx_t *ctx, v4l2_ctx_t *v4l2, int width
     memset(ctx, 0, sizeof(*ctx));
     ctx->width = width;
     ctx->height = height;
-    ctx->format = RK_FORMAT_YCbCr_420_SP;
     ctx->enabled = 1;
 
-#if defined(LIBRGA_IM2D_HANDLE)
     for (int i = 0; i < BUF_COUNT; i++) {
-        im_handle_param_t param;
-        memset(&param, 0, sizeof(param));
-        param.width = width;
-        param.height = height;
-        param.format = ctx->format;
-
-        int dma_fd = v4l2->bufs[i].plane[0].dma_fd;
-        if (dma_fd < 0) {
+        if (v4l2->bufs[i].plane[0].dma_fd < 0) {
             ctx->enabled = 0;
             break;
         }
-
-        ctx->handles[i] = importbuffer_fd(dma_fd, &param);
-        if (ctx->handles[i] <= 0) {
-            ctx->enabled = 0;
-            break;
-        }
-
-        ctx->buffers[i] = wrapbuffer_handle(ctx->handles[i],
-                                            width, height, ctx->format,
-                                            width, height);
     }
-#else
-    (void)v4l2;
-#endif
 
     if (ctx->enabled) {
-        printf("[rga] overlay draw enabled, mode=%s\n",
-#if defined(LIBRGA_IM2D_HANDLE)
-               "cached-handle"
-#else
-               "fd-wrap"
-#endif
-        );
+        printf("[rga] overlay draw enabled, mode=fd-wrap-helper\n");
     } else {
         printf("[rga] overlay draw disabled, fallback to CPU draw\n");
     }
@@ -326,16 +299,7 @@ static void rga_overlay_init(rga_overlay_ctx_t *ctx, v4l2_ctx_t *v4l2, int width
 
 static void rga_overlay_deinit(rga_overlay_ctx_t *ctx)
 {
-#if defined(LIBRGA_IM2D_HANDLE)
-    for (int i = 0; i < BUF_COUNT; i++) {
-        if (ctx->handles[i] > 0) {
-            releasebuffer_handle(ctx->handles[i]);
-            ctx->handles[i] = 0;
-        }
-    }
-#else
     (void)ctx;
-#endif
 }
 
 static inline int align_down_even(int v)
@@ -348,18 +312,7 @@ static inline int align_up_even(int v)
     return (v + 1) & ~1;
 }
 
-static int make_nv12_fill_color(uint8_t y)
-{
-    int color = 0;
-    unsigned char *p = (unsigned char *)&color;
-    p[0] = y;
-    p[1] = 128;
-    p[2] = 128;
-    p[3] = 255;
-    return color;
-}
-
-static int rga_clip_rect_even(im_rect *rect, int img_w, int img_h)
+static int rga_clip_rect_even(overlay_rect_t *rect, int img_w, int img_h)
 {
     int x0 = rect->x;
     int y0 = rect->y;
@@ -390,28 +343,22 @@ static int rga_clip_rect_even(im_rect *rect, int img_w, int img_h)
 }
 
 static int rga_fill_rect(rga_overlay_ctx_t *ctx, int buf_index, int dma_fd,
-                         int img_w, int img_h, im_rect rect, int color)
+                         int img_w, int img_h, overlay_rect_t rect, uint8_t y_val)
 {
     if (!ctx || !ctx->enabled || buf_index < 0 || buf_index >= BUF_COUNT)
         return -1;
     if (rga_clip_rect_even(&rect, img_w, img_h) < 0)
         return 0;
-
-#if defined(LIBRGA_IM2D_HANDLE)
-    rga_buffer_t dst = ctx->buffers[buf_index];
-#else
     if (dma_fd < 0)
         return -1;
-    rga_buffer_t dst = wrapbuffer_fd(dma_fd, img_w, img_h,
-                                     RK_FORMAT_YCbCr_420_SP,
-                                     img_w, img_h);
-#endif
 
-    IM_STATUS ret = imfill(dst, rect, color);
-    if (ret <= 0) {
+    int ret = rga_nv12_fill_rect_fd(dma_fd, img_w, img_h,
+                                    rect.x, rect.y, rect.width, rect.height,
+                                    y_val);
+    if (ret < 0) {
         static int warn_count = 0;
         if (warn_count < 5) {
-            printf("[rga] imfill failed: %s\n", imStrError(ret));
+            printf("[rga] fill rect failed, fallback to CPU draw\n");
             warn_count++;
         }
         return -1;
@@ -431,19 +378,18 @@ static int rga_draw_rect_nv12(rga_overlay_ctx_t *ctx, int buf_index, int dma_fd,
     if (x1 >= x2 || y1 >= y2)
         return 0;
 
-    int color = make_nv12_fill_color(y_val);
-    im_rect top = {x1, y1, x2 - x1 + 1, thickness};
-    im_rect bottom = {x1, y2 - thickness + 1, x2 - x1 + 1, thickness};
-    im_rect left = {x1, y1, thickness, y2 - y1 + 1};
-    im_rect right = {x2 - thickness + 1, y1, thickness, y2 - y1 + 1};
+    overlay_rect_t top = {x1, y1, x2 - x1 + 1, thickness};
+    overlay_rect_t bottom = {x1, y2 - thickness + 1, x2 - x1 + 1, thickness};
+    overlay_rect_t left = {x1, y1, thickness, y2 - y1 + 1};
+    overlay_rect_t right = {x2 - thickness + 1, y1, thickness, y2 - y1 + 1};
 
-    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, top, color) < 0)
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, top, y_val) < 0)
         return -1;
-    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, bottom, color) < 0)
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, bottom, y_val) < 0)
         return -1;
-    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, left, color) < 0)
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, left, y_val) < 0)
         return -1;
-    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, right, color) < 0)
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, right, y_val) < 0)
         return -1;
 
     return 0;
