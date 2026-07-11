@@ -177,30 +177,6 @@ int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx) {
     return 0;
 }
 
-int NC1HWC2_i8_to_NCHW_i8(const int8_t *src, int8_t *dst, int *dims, int channel, int h, int w, int zp, float scale) {
-    int batch  = dims[0];
-    int C1     = dims[1];
-    int C2     = dims[4];
-    int hw_src = dims[2] * dims[3];
-    int hw_dst = h * w;
-    for (int i = 0; i < batch; i++) {
-        const int8_t *src_b = src + i * C1 * hw_src * C2;
-        int8_t        *dst_b = dst + i * channel * hw_dst;
-        for (int c = 0; c < channel; ++c) {
-            int           plane  = c / C2;
-            const int8_t *src_bc = plane * hw_src * C2 + src_b;
-            int           offset = c % C2;
-            for (int cur_h = 0; cur_h < h; ++cur_h)
-                for (int cur_w = 0; cur_w < w; ++cur_w) {
-                    int cur_hw                 = cur_h * w + cur_w;
-                    dst_b[c * hw_dst + cur_hw] = src_bc[C2 * cur_hw + offset] ; // int8-->int8
-                }
-        }
-    }
-
-    return 0;
-}
-
 int release_yolo11_model(rknn_app_context_t *app_ctx) {
     int ret;
     if (app_ctx->input_attrs != NULL) {
@@ -311,43 +287,13 @@ int inference_yolo11_model(rknn_app_context_t *app_ctx, image_buffer_t *img, obj
         return -1;
     }
 
-    //NC1HWC2 to NCHW
-    rknn_output outputs[app_ctx->io_num.n_output];
-    memset(outputs, 0, sizeof(outputs));
-    for (uint32_t i = 0; i < app_ctx->io_num.n_output; i++) {
-        int   channel = app_ctx->output_attrs[i].dims[1];
-        int   h       = app_ctx->output_attrs[i].n_dims > 2 ? app_ctx->output_attrs[i].dims[2] : 1;
-        int   w       = app_ctx->output_attrs[i].n_dims > 3 ? app_ctx->output_attrs[i].dims[3] : 1;
-        int   hw      = h * w;
-        int   zp      = app_ctx->output_native_attrs[i].zp;
-        float scale   = app_ctx->output_native_attrs[i].scale;
-        if (app_ctx->is_quant) {
-            outputs[i].size = app_ctx->output_native_attrs[i].n_elems * sizeof(int8_t);
-            outputs[i].buf = (int8_t *)malloc(outputs[i].size);
-            if (app_ctx->output_native_attrs[i].fmt == RKNN_TENSOR_NC1HWC2) {
-                NC1HWC2_i8_to_NCHW_i8((int8_t *)app_ctx->output_mems[i]->virt_addr, (int8_t *)outputs[i].buf,
-                                      (int *)app_ctx->output_native_attrs[i].dims, channel, h, w, zp, scale);
-            } else {
-                memcpy(outputs[i].buf, app_ctx->output_mems[i]->virt_addr, outputs[i].size);
-            }
-        } else {
-            printf("Currently zero copy does not support fp16!\n");
-            goto out;
-        }
-    }
-
     t_out = yolo_now_us();
-    app_ctx->last_output_convert_us = t_out - t_run;
+    app_ctx->last_output_convert_us = 0;
 
-    // Post Process
-    post_process(app_ctx, outputs, &letter_box, box_conf_threshold, nms_threshold, od_results);
+    // Post Process directly reads native zero-copy output buffers.
+    ret = post_process_native(app_ctx, &letter_box, box_conf_threshold, nms_threshold, od_results);
     t_post = yolo_now_us();
     app_ctx->last_postprocess_us = t_post - t_out;
 
-    for (int i = 0; i < app_ctx->io_num.n_output; i++) {
-        free(outputs[i].buf);
-    }
-
-out:
     return ret;
 }

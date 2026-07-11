@@ -286,9 +286,6 @@ static void draw_rect_nv12(uint8_t *nv12, int img_w, int img_h,
 static void draw_detections(uint8_t *nv12, int img_w, int img_h,
                             const object_detect_result_list *results)
 {
-    if (BOUNDARY_Y < img_h)
-        for (int x = 0; x < img_w; x++) nv12[BOUNDARY_Y * img_w + x] = 200;
-
     for (int i = 0; i < results->count; i++) {
         const object_detect_result *det = &results->results[i];
         if (det->cls_id != 0) continue;
@@ -399,24 +396,65 @@ static void *process_thread_main(void *opaque)
         }
         int64_t t1 = now_us();
 
-        uint8_t *frm_ptr = (uint8_t *)mpp_buffer_get_ptr(enc->frm_buf);
-        memcpy(frm_ptr, frm.data, (size_t)width * height * 3 / 2);
-        int64_t t_memcpy = now_us();
-
-        handoff_release_frame(q, frm.buf_index);
-        int64_t t_return = now_us();
-
-        draw_detections(frm_ptr, width, height, &od_results);
-        int64_t t_draw = now_us();
-
+        int use_dmabuf_frame = enc->use_dmabuf &&
+                               frm.buf_index >= 0 &&
+                               frm.buf_index < MAX_BUF_COUNT &&
+                               enc->dma_bufs[frm.buf_index] != NULL;
+        uint8_t *encode_ptr = NULL;
+        int encode_buf_index = -1;
+        int64_t memcpy_us = 0;
+        int64_t v4l2_return_us = 0;
+        int64_t draw_us = 0;
+        int64_t encode_us = 0;
+        int64_t t2 = 0;
         uint8_t *h264_data = NULL;
         int h264_size = 0;
         const MppPktSeg *seg = NULL;
-        if (mpp_encoder_encode(enc, frm_ptr, width * height * 3 / 2,
-                               -1, &h264_data, &h264_size, &seg) < 0) {
-            continue;
+
+        if (use_dmabuf_frame) {
+            encode_ptr = (uint8_t *)frm.data;
+            encode_buf_index = frm.buf_index;
+
+            int64_t t_draw_begin = now_us();
+            draw_detections(encode_ptr, width, height, &od_results);
+            int64_t t_draw_end = now_us();
+            draw_us = t_draw_end - t_draw_begin;
+
+            if (mpp_encoder_encode(enc, encode_ptr, frm.size,
+                                   encode_buf_index, &h264_data, &h264_size, &seg) < 0) {
+                handoff_release_frame(q, frm.buf_index);
+                continue;
+            }
+            t2 = now_us();
+            encode_us = t2 - t_draw_end;
+
+            int64_t t_return_begin = now_us();
+            handoff_release_frame(q, frm.buf_index);
+            int64_t t_return_end = now_us();
+            v4l2_return_us = t_return_end - t_return_begin;
+        } else {
+            encode_ptr = (uint8_t *)mpp_buffer_get_ptr(enc->frm_buf);
+            memcpy(encode_ptr, frm.data, (size_t)width * height * 3 / 2);
+            int64_t t_memcpy = now_us();
+            memcpy_us = t_memcpy - t1;
+
+            int64_t t_return_begin = now_us();
+            handoff_release_frame(q, frm.buf_index);
+            int64_t t_return_end = now_us();
+            v4l2_return_us = t_return_end - t_return_begin;
+
+            int64_t t_draw_begin = now_us();
+            draw_detections(encode_ptr, width, height, &od_results);
+            int64_t t_draw_end = now_us();
+            draw_us = t_draw_end - t_draw_begin;
+
+            if (mpp_encoder_encode(enc, encode_ptr, width * height * 3 / 2,
+                                   -1, &h264_data, &h264_size, &seg) < 0) {
+                continue;
+            }
+            t2 = now_us();
+            encode_us = t2 - t_draw_end;
         }
-        int64_t t2 = now_us();
 
         if (h264_size > 0)
             rtsp_tx_video(arg->session, h264_data, h264_size, ts);
@@ -436,10 +474,10 @@ static void *process_thread_main(void *opaque)
                     frm.capture_ts_to_dqbuf_us,
                     handoff_delay,
                     t1 - t_loop_begin,
-                    t_memcpy - t1,
-                    t_return - t_memcpy,
-                    t_draw - t_return,
-                    t2 - t_draw,
+                    memcpy_us,
+                    v4l2_return_us,
+                    draw_us,
+                    encode_us,
                     enc->last_prepare_us,
                     enc->last_input_wait_us,
                     enc->last_hw_wait_us,
@@ -502,6 +540,18 @@ int main(int argc, char *argv[])
     }
     enc_ok = 1;
 
+    {
+        int dma_fds[BUF_COUNT];
+        size_t dmabuf_size = v4l2.bufs[0].plane[0].length;
+        for (int i = 0; i < BUF_COUNT; i++)
+            dma_fds[i] = v4l2.bufs[i].plane[0].dma_fd;
+        if (mpp_encoder_setup_dmabuf(&enc, dma_fds, BUF_COUNT, dmabuf_size) == 0) {
+            printf("[main] MPP uses V4L2 DMA-BUF directly, NV12 memcpy disabled\n");
+        } else {
+            printf("[main] MPP DMA-BUF import failed, fallback to NV12 memcpy\n");
+        }
+    }
+
     init_post_process();
     if (init_yolo11_model(model_path, &rknn_ctx) != 0) {
         fprintf(stderr, "init_yolo11_model failed\n");
@@ -522,7 +572,7 @@ int main(int argc, char *argv[])
 
     printf("========================================\n");
     printf("RTSP: rtsp://YOUR_BOARD_IP:8554/live\n");
-    printf("设备: %s  %dx%d@%dfps  警戒线: y=%d\n", dev, width, height, fps, BOUNDARY_Y);
+    printf("设备: %s  %dx%d@%dfps  越界阈值: y=%d (不显示横线)\n", dev, width, height, fps, BOUNDARY_Y);
     printf("多线程模式: V4L2 handoff + process/encode/rtsp thread\n");
     printf("每%d帧打印一次延迟统计\n", STAT_INTERVAL);
     printf("========================================\n");

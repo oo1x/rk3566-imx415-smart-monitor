@@ -367,6 +367,103 @@ static int process_i8(int8_t *box_tensor, int32_t box_zp, float box_scale,
     return validCount;
 }
 
+#if defined(ZERO_COPY)
+static inline int8_t tensor_i8_at(const int8_t *base,
+                                  const rknn_tensor_attr *logical_attr,
+                                  const rknn_tensor_attr *native_attr,
+                                  int c, int h, int w)
+{
+    if (native_attr->fmt == RKNN_TENSOR_NC1HWC2 && native_attr->n_dims >= 5)
+    {
+        int c2 = native_attr->dims[4];
+        int native_h = native_attr->dims[2];
+        int native_w = native_attr->dims[3];
+        int c1 = c / c2;
+        int c2_idx = c % c2;
+        return base[(((c1 * native_h + h) * native_w + w) * c2) + c2_idx];
+    }
+
+    int grid_h = logical_attr->n_dims > 2 ? logical_attr->dims[2] : 1;
+    int grid_w = logical_attr->n_dims > 3 ? logical_attr->dims[3] : 1;
+    return base[c * grid_h * grid_w + h * grid_w + w];
+}
+
+static int process_i8_native(rknn_app_context_t *app_ctx,
+                             int box_idx, int score_idx, int score_sum_idx,
+                             int grid_h, int grid_w, int stride, int dfl_len,
+                             std::vector<float> &boxes,
+                             std::vector<float> &objProbs,
+                             std::vector<int> &classId,
+                             float threshold)
+{
+    int validCount = 0;
+    const int8_t *box_tensor = (const int8_t *)app_ctx->output_mems[box_idx]->virt_addr;
+    const int8_t *score_tensor = (const int8_t *)app_ctx->output_mems[score_idx]->virt_addr;
+    const int8_t *score_sum_tensor = score_sum_idx >= 0 ?
+        (const int8_t *)app_ctx->output_mems[score_sum_idx]->virt_addr : nullptr;
+    const rknn_tensor_attr *box_attr = &app_ctx->output_attrs[box_idx];
+    const rknn_tensor_attr *score_attr = &app_ctx->output_attrs[score_idx];
+    const rknn_tensor_attr *score_sum_attr = score_sum_idx >= 0 ? &app_ctx->output_attrs[score_sum_idx] : nullptr;
+    const rknn_tensor_attr *box_native = &app_ctx->output_native_attrs[box_idx];
+    const rknn_tensor_attr *score_native = &app_ctx->output_native_attrs[score_idx];
+    const rknn_tensor_attr *score_sum_native = score_sum_idx >= 0 ? &app_ctx->output_native_attrs[score_sum_idx] : nullptr;
+    int8_t score_thres_i8 = qnt_f32_to_affine(threshold, score_attr->zp, score_attr->scale);
+    int8_t score_sum_thres_i8 = score_sum_attr ?
+        qnt_f32_to_affine(threshold, score_sum_attr->zp, score_sum_attr->scale) : 0;
+
+    for (int i = 0; i < grid_h; i++)
+    {
+        for (int j = 0; j < grid_w; j++)
+        {
+            int max_class_id = -1;
+            int8_t max_score = -score_attr->zp;
+
+            if (score_sum_tensor &&
+                tensor_i8_at(score_sum_tensor, score_sum_attr, score_sum_native, 0, i, j) < score_sum_thres_i8)
+            {
+                continue;
+            }
+
+            for (int c = 0; c < OBJ_CLASS_NUM; c++)
+            {
+                int8_t score = tensor_i8_at(score_tensor, score_attr, score_native, c, i, j);
+                if ((score > score_thres_i8) && (score > max_score))
+                {
+                    max_score = score;
+                    max_class_id = c;
+                }
+            }
+
+            if (max_score > score_thres_i8)
+            {
+                float box[4];
+                float before_dfl[dfl_len * 4];
+                for (int k = 0; k < dfl_len * 4; k++)
+                {
+                    int8_t q = tensor_i8_at(box_tensor, box_attr, box_native, k, i, j);
+                    before_dfl[k] = deqnt_affine_to_f32(q, box_attr->zp, box_attr->scale);
+                }
+                compute_dfl(before_dfl, dfl_len, box);
+
+                float x1 = (-box[0] + j + 0.5) * stride;
+                float y1 = (-box[1] + i + 0.5) * stride;
+                float x2 = ( box[2] + j + 0.5) * stride;
+                float y2 = ( box[3] + i + 0.5) * stride;
+                boxes.push_back(x1);
+                boxes.push_back(y1);
+                boxes.push_back(x2 - x1);
+                boxes.push_back(y2 - y1);
+                objProbs.push_back(deqnt_affine_to_f32(max_score, score_attr->zp, score_attr->scale));
+                classId.push_back(max_class_id);
+                validCount++;
+            }
+        }
+    }
+
+    return validCount;
+}
+#endif
+
 static int process_fp32(float *box_tensor, float *score_tensor, float *score_sum_tensor, 
                         int grid_h, int grid_w, int stride, int dfl_len,
                         std::vector<float> &boxes, 
@@ -653,6 +750,99 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
     }
     od_results->count = last_count;
     return 0;
+}
+
+int post_process_native(rknn_app_context_t *app_ctx, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_detect_result_list *od_results)
+{
+#if defined(ZERO_COPY)
+    std::vector<float> filterBoxes;
+    std::vector<float> objProbs;
+    std::vector<int> classId;
+    int validCount = 0;
+    int model_in_w = app_ctx->model_width;
+    int model_in_h = app_ctx->model_height;
+
+    memset(od_results, 0, sizeof(object_detect_result_list));
+
+    if (!app_ctx->is_quant)
+    {
+        printf("native zero-copy post_process only supports int8 outputs\n");
+        return -1;
+    }
+
+    filterBoxes.reserve(256 * 4);
+    objProbs.reserve(256);
+    classId.reserve(256);
+
+    int dfl_len = app_ctx->output_attrs[0].dims[1] / 4;
+    int output_per_branch = app_ctx->io_num.n_output / 3;
+    for (int i = 0; i < 3; i++)
+    {
+        int box_idx = i * output_per_branch;
+        int score_idx = box_idx + 1;
+        int score_sum_idx = output_per_branch == 3 ? box_idx + 2 : -1;
+        int grid_h = app_ctx->output_attrs[box_idx].dims[2];
+        int grid_w = app_ctx->output_attrs[box_idx].dims[3];
+        int stride = model_in_h / grid_h;
+
+        validCount += process_i8_native(app_ctx, box_idx, score_idx, score_sum_idx,
+                                        grid_h, grid_w, stride, dfl_len,
+                                        filterBoxes, objProbs, classId, conf_threshold);
+    }
+
+    if (validCount <= 0)
+    {
+        return 0;
+    }
+
+    std::vector<int> indexArray;
+    indexArray.reserve(validCount);
+    for (int i = 0; i < validCount; ++i)
+    {
+        indexArray.push_back(i);
+    }
+    quick_sort_indice_inverse(objProbs, 0, validCount - 1, indexArray);
+
+    std::set<int> class_set(std::begin(classId), std::end(classId));
+    for (auto c : class_set)
+    {
+        nms(validCount, filterBoxes, classId, indexArray, c, nms_threshold);
+    }
+
+    int last_count = 0;
+    od_results->count = 0;
+    for (int i = 0; i < validCount; ++i)
+    {
+        if (indexArray[i] == -1 || last_count >= OBJ_NUMB_MAX_SIZE)
+        {
+            continue;
+        }
+        int n = indexArray[i];
+
+        float x1 = filterBoxes[n * 4 + 0] - letter_box->x_pad;
+        float y1 = filterBoxes[n * 4 + 1] - letter_box->y_pad;
+        float x2 = x1 + filterBoxes[n * 4 + 2];
+        float y2 = y1 + filterBoxes[n * 4 + 3];
+
+        od_results->results[last_count].box.left = (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
+        od_results->results[last_count].box.top = (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
+        od_results->results[last_count].box.right = (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
+        od_results->results[last_count].box.bottom = (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+        od_results->results[last_count].prop = objProbs[i];
+        od_results->results[last_count].cls_id = classId[n];
+        last_count++;
+    }
+    od_results->count = last_count;
+    return 0;
+#else
+    (void)app_ctx;
+    (void)letter_box;
+    (void)conf_threshold;
+    (void)nms_threshold;
+    memset(od_results, 0, sizeof(object_detect_result_list));
+    printf("post_process_native requires ZERO_COPY build\n");
+    return -1;
+#endif
 }
 
 int init_post_process()
