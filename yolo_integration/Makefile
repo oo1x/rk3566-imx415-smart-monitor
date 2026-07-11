@@ -70,7 +70,7 @@ C_OBJS   = $(addprefix obj/, $(notdir $(C_SRCS:.c=.o)))
 CXX_OBJS = $(addprefix obj/, $(notdir $(CXX_SRCS:.cpp=.o)))
 CXX_OBJS := $(CXX_OBJS:.cc=.o)
 
-TARGET = imx415_yolo_rtsp
+TARGET ?= imx415_yolo_rtsp
 
 all: obj $(TARGET)
 

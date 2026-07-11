@@ -21,11 +21,14 @@ extern "C" {
 #include "yolo11.h"
 #include "image_utils.h"
 #include "image_drawing.h"
+#include "im2d.h"
+#include "drmrga.h"
 
 #define BOUNDARY_Y      540
 #define RKNN_MODEL_PATH "/mnt/nfs/rknn_yolo11_demo/model/yolo11.rknn"
 #define STAT_INTERVAL   100
 #define YOLO_INFER_INTERVAL 3
+#define RGA_OVERLAY_THICKNESS 4
 
 static volatile int g_running = 1;
 static void sig_handler(int sig) { (void)sig; g_running = 0; }
@@ -186,6 +189,17 @@ typedef struct {
 } handoff_queue_t;
 
 typedef struct {
+    int enabled;
+    int width;
+    int height;
+    int format;
+#if defined(LIBRGA_IM2D_HANDLE)
+    rga_buffer_handle_t handles[BUF_COUNT];
+    rga_buffer_t buffers[BUF_COUNT];
+#endif
+} rga_overlay_ctx_t;
+
+typedef struct {
     v4l2_ctx_t *v4l2;
     handoff_queue_t *queue;
 } capture_thread_arg_t;
@@ -196,6 +210,7 @@ typedef struct {
     rknn_app_context_t *rknn_ctx;
     rtsp_demo_handle demo;
     rtsp_session_handle session;
+    rga_overlay_ctx_t *rga_overlay;
     int width;
     int height;
     int fps;
@@ -260,6 +275,180 @@ static void handoff_release_frame(handoff_queue_t *q, int buf_index)
     pthread_mutex_unlock(&q->mutex);
 }
 
+static void rga_overlay_init(rga_overlay_ctx_t *ctx, v4l2_ctx_t *v4l2, int width, int height)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->width = width;
+    ctx->height = height;
+    ctx->format = RK_FORMAT_YCbCr_420_SP;
+    ctx->enabled = 1;
+
+#if defined(LIBRGA_IM2D_HANDLE)
+    for (int i = 0; i < BUF_COUNT; i++) {
+        im_handle_param_t param;
+        memset(&param, 0, sizeof(param));
+        param.width = width;
+        param.height = height;
+        param.format = ctx->format;
+
+        int dma_fd = v4l2->bufs[i].plane[0].dma_fd;
+        if (dma_fd < 0) {
+            ctx->enabled = 0;
+            break;
+        }
+
+        ctx->handles[i] = importbuffer_fd(dma_fd, &param);
+        if (ctx->handles[i] <= 0) {
+            ctx->enabled = 0;
+            break;
+        }
+
+        ctx->buffers[i] = wrapbuffer_handle(ctx->handles[i],
+                                            width, height, ctx->format,
+                                            width, height);
+    }
+#else
+    (void)v4l2;
+#endif
+
+    if (ctx->enabled) {
+        printf("[rga] overlay draw enabled, mode=%s\n",
+#if defined(LIBRGA_IM2D_HANDLE)
+               "cached-handle"
+#else
+               "fd-wrap"
+#endif
+        );
+    } else {
+        printf("[rga] overlay draw disabled, fallback to CPU draw\n");
+    }
+}
+
+static void rga_overlay_deinit(rga_overlay_ctx_t *ctx)
+{
+#if defined(LIBRGA_IM2D_HANDLE)
+    for (int i = 0; i < BUF_COUNT; i++) {
+        if (ctx->handles[i] > 0) {
+            releasebuffer_handle(ctx->handles[i]);
+            ctx->handles[i] = 0;
+        }
+    }
+#else
+    (void)ctx;
+#endif
+}
+
+static inline int align_down_even(int v)
+{
+    return v & ~1;
+}
+
+static inline int align_up_even(int v)
+{
+    return (v + 1) & ~1;
+}
+
+static int make_nv12_fill_color(uint8_t y)
+{
+    int color = 0;
+    unsigned char *p = (unsigned char *)&color;
+    p[0] = y;
+    p[1] = 128;
+    p[2] = 128;
+    p[3] = 255;
+    return color;
+}
+
+static int rga_clip_rect_even(im_rect *rect, int img_w, int img_h)
+{
+    int x0 = rect->x;
+    int y0 = rect->y;
+    int x1 = rect->x + rect->width;
+    int y1 = rect->y + rect->height;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > img_w) x1 = img_w;
+    if (y1 > img_h) y1 = img_h;
+    if (x1 <= x0 || y1 <= y0)
+        return -1;
+
+    x0 = align_down_even(x0);
+    y0 = align_down_even(y0);
+    x1 = align_up_even(x1);
+    y1 = align_up_even(y1);
+    if (x1 > img_w) x1 = img_w;
+    if (y1 > img_h) y1 = img_h;
+    if ((x1 - x0) < 2 || (y1 - y0) < 2)
+        return -1;
+
+    rect->x = x0;
+    rect->y = y0;
+    rect->width = x1 - x0;
+    rect->height = y1 - y0;
+    return 0;
+}
+
+static int rga_fill_rect(rga_overlay_ctx_t *ctx, int buf_index, int dma_fd,
+                         int img_w, int img_h, im_rect rect, int color)
+{
+    if (!ctx || !ctx->enabled || buf_index < 0 || buf_index >= BUF_COUNT)
+        return -1;
+    if (rga_clip_rect_even(&rect, img_w, img_h) < 0)
+        return 0;
+
+#if defined(LIBRGA_IM2D_HANDLE)
+    rga_buffer_t dst = ctx->buffers[buf_index];
+#else
+    if (dma_fd < 0)
+        return -1;
+    rga_buffer_t dst = wrapbuffer_fd(dma_fd, img_w, img_h,
+                                     RK_FORMAT_YCbCr_420_SP,
+                                     img_w, img_h);
+#endif
+
+    IM_STATUS ret = imfill(dst, rect, color);
+    if (ret <= 0) {
+        static int warn_count = 0;
+        if (warn_count < 5) {
+            printf("[rga] imfill failed: %s\n", imStrError(ret));
+            warn_count++;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static int rga_draw_rect_nv12(rga_overlay_ctx_t *ctx, int buf_index, int dma_fd,
+                              int img_w, int img_h,
+                              int x1, int y1, int x2, int y2,
+                              uint8_t y_val, int thickness)
+{
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 >= img_w) x2 = img_w - 1;
+    if (y2 >= img_h) y2 = img_h - 1;
+    if (x1 >= x2 || y1 >= y2)
+        return 0;
+
+    int color = make_nv12_fill_color(y_val);
+    im_rect top = {x1, y1, x2 - x1 + 1, thickness};
+    im_rect bottom = {x1, y2 - thickness + 1, x2 - x1 + 1, thickness};
+    im_rect left = {x1, y1, thickness, y2 - y1 + 1};
+    im_rect right = {x2 - thickness + 1, y1, thickness, y2 - y1 + 1};
+
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, top, color) < 0)
+        return -1;
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, bottom, color) < 0)
+        return -1;
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, left, color) < 0)
+        return -1;
+    if (rga_fill_rect(ctx, buf_index, dma_fd, img_w, img_h, right, color) < 0)
+        return -1;
+
+    return 0;
+}
+
 static void draw_rect_nv12(uint8_t *nv12, int img_w, int img_h,
                            int x1, int y1, int x2, int y2,
                            uint8_t y_val, int thickness)
@@ -283,8 +472,8 @@ static void draw_rect_nv12(uint8_t *nv12, int img_w, int img_h,
     }
 }
 
-static void draw_detections(uint8_t *nv12, int img_w, int img_h,
-                            const object_detect_result_list *results)
+static void draw_detections_cpu(uint8_t *nv12, int img_w, int img_h,
+                                const object_detect_result_list *results)
 {
     for (int i = 0; i < results->count; i++) {
         const object_detect_result *det = &results->results[i];
@@ -300,6 +489,35 @@ static void draw_detections(uint8_t *nv12, int img_w, int img_h,
             draw_rect_nv12(nv12, img_w, img_h, x1, y1, x2, y2, 235, 3);
         }
     }
+}
+
+static int draw_detections_rga(rga_overlay_ctx_t *ctx, int buf_index, int dma_fd,
+                               int img_w, int img_h,
+                               const object_detect_result_list *results)
+{
+    if (!ctx || !ctx->enabled)
+        return -1;
+
+    for (int i = 0; i < results->count; i++) {
+        const object_detect_result *det = &results->results[i];
+        if (det->cls_id != 0) continue;
+        int x1 = det->box.left, y1 = det->box.top;
+        int x2 = det->box.right, y2 = det->box.bottom;
+        int cy = (y1 + y2) / 2;
+        uint8_t y_val = (cy > BOUNDARY_Y) ? 64 : 235;
+
+        if (rga_draw_rect_nv12(ctx, buf_index, dma_fd, img_w, img_h,
+                               x1, y1, x2, y2, y_val,
+                               RGA_OVERLAY_THICKNESS) < 0) {
+            return -1;
+        }
+
+        if (cy > BOUNDARY_Y) {
+            printf("[ALERT] 入侵! person@(%d,%d,%d,%d) 越过y=%d 置信度=%.1f%%\n",
+                   x1, y1, x2, y2, BOUNDARY_Y, det->prop * 100.0f);
+        }
+    }
+    return 0;
 }
 
 static void *capture_thread_main(void *opaque)
@@ -416,7 +634,10 @@ static void *process_thread_main(void *opaque)
             encode_buf_index = frm.buf_index;
 
             int64_t t_draw_begin = now_us();
-            draw_detections(encode_ptr, width, height, &od_results);
+            if (draw_detections_rga(arg->rga_overlay, frm.buf_index, frm.dma_fd,
+                                    width, height, &od_results) < 0) {
+                draw_detections_cpu(encode_ptr, width, height, &od_results);
+            }
             int64_t t_draw_end = now_us();
             draw_us = t_draw_end - t_draw_begin;
 
@@ -444,7 +665,7 @@ static void *process_thread_main(void *opaque)
             v4l2_return_us = t_return_end - t_return_begin;
 
             int64_t t_draw_begin = now_us();
-            draw_detections(encode_ptr, width, height, &od_results);
+            draw_detections_cpu(encode_ptr, width, height, &od_results);
             int64_t t_draw_end = now_us();
             draw_us = t_draw_end - t_draw_begin;
 
@@ -516,6 +737,7 @@ int main(int argc, char *argv[])
     int ret = 0;
     v4l2_ctx_t v4l2 = {0};
     mpp_enc_ctx_t enc = {0};
+    rga_overlay_ctx_t rga_overlay;
     rknn_app_context_t rknn_ctx;
     rtsp_demo_handle demo = NULL;
     rtsp_session_handle session = NULL;
@@ -527,6 +749,7 @@ int main(int argc, char *argv[])
 
     memset(&rknn_ctx, 0, sizeof(rknn_ctx));
     memset(&queue, 0, sizeof(queue));
+    memset(&rga_overlay, 0, sizeof(rga_overlay));
 
     if (v4l2_open(&v4l2, dev, width, height) < 0) {
         fprintf(stderr, "v4l2_open failed\n");
@@ -539,6 +762,8 @@ int main(int argc, char *argv[])
         ret = -1; goto cleanup;
     }
     enc_ok = 1;
+
+    rga_overlay_init(&rga_overlay, &v4l2, width, height);
 
     {
         int dma_fds[BUF_COUNT];
@@ -586,6 +811,7 @@ int main(int argc, char *argv[])
     proc_arg.rknn_ctx = &rknn_ctx;
     proc_arg.demo = demo;
     proc_arg.session = session;
+    proc_arg.rga_overlay = &rga_overlay;
     proc_arg.width = width;
     proc_arg.height = height;
     proc_arg.fps = fps;
@@ -618,6 +844,7 @@ cleanup:
     if (process_started) pthread_join(process_tid, NULL);
     deinit_post_process();
     if (rknn_ok) release_yolo11_model(&rknn_ctx);
+    rga_overlay_deinit(&rga_overlay);
     if (session) rtsp_del_session(session);
     if (demo) rtsp_del_demo(demo);
     if (enc_ok) mpp_encoder_close(&enc);
