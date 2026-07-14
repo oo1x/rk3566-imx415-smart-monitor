@@ -13,7 +13,7 @@ IMX415 Sensor
   -> V4L2 DQBUF 取帧
   -> RGA letterbox 预处理
   -> RKNN / NPU YOLO11n 推理
-  -> 检测框与警戒线叠加
+  -> 检测框
   -> MPP H.264 硬件编码
   -> RTSP 推流
   -> ffplay 局域网预览
