@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "testbed": {
+    "ssh_target": "cat@192.168.1.20",
+    "remote_root": "/home/cat/latency_test",
+    "binary": "imx415_yolo_rtsp_1080p60_scripted_test",
+    "expected_binary_md5": "fbc5c50fc6fc1b76482353a0b430d9cc",
+    "model": "/home/cat/latency_test/model/yolo11.rknn",
+    "device": "/dev/video0",
+    "rtsp_url": "rtsp://192.168.1.20:8554/live",
+    "rtsp_transport": "tcp",
+    "width": 1920,
+    "height": 1080,
+    "configured_fps": 60,
+    "remote_python": "python3",
+    "startup_timeout_sec": 30,
+    "shutdown_timeout_sec": 10,
+    "minimum_local_free_bytes": 1073741824,
+    "minimum_remote_free_bytes": 536870912,
+    "cpu_governor": "performance",
+    "npu_governor": "userspace",
+    "npu_frequency_hz": 600000000
+  },
+  "defaults": {
+    "duration_sec": 300,
+    "warmup_sec": 120,
+    "repeat": 3,
+    "reuse_boxes": true,
+    "detailed_trace": true,
+    "defer_ai_until_measurement": false,
+    "infer_queue_limit": 8,
+    "thresholds": {
+      "min_capture_fps": 59.0,
+      "min_output_fps": 55.0,
+      "max_video_drop_pct": 5.0,
+      "max_temperature_c": 85.0,
+      "max_rss_mb": 512.0
+    }
+  },
+  "scenarios": [
+    {
+      "scenario": "S0",
+      "description": "AI disabled video baseline",
+      "ai_enabled": false,
+      "trigger_interval": 0,
+      "submit_policy": "disabled",
+      "reuse_boxes": false,
+      "thresholds": {
+        "min_capture_fps": 59.5,
+        "min_output_fps": 58.0,
+        "max_video_drop_pct": 3.0,
+        "max_inference_queue": 0
+      }
+    },
+    {
+      "scenario": "S1",
+      "description": "Attempt inference on every frame; stop and preserve evidence when queue reaches limit",
+      "duration_sec": 60,
+      "ai_enabled": true,
+      "trigger_interval": 1,
+      "submit_policy": "always_queue",
+      "defer_ai_until_measurement": true,
+      "expected_queue_stop": true,
+      "inherit_default_thresholds": false,
+      "thresholds": {}
+    },
+    {
+      "scenario": "S2",
+      "description": "Submit every third frame and allow backlog; stop at bounded safety limit",
+      "duration_sec": 60,
+      "ai_enabled": true,
+      "trigger_interval": 3,
+      "submit_policy": "always_queue",
+      "defer_ai_until_measurement": true,
+      "expected_queue_stop": true,
+      "inherit_default_thresholds": false,
+      "thresholds": {}
+    },
+    {
+      "scenario": "S3",
+      "description": "Every third frame, submit the latest frame only while NPU is idle",
+      "ai_enabled": true,
+      "trigger_interval": 3,
+      "submit_policy": "latest_if_idle",
+      "thresholds": {
+        "max_inference_queue": 1
+      }
+    },
+    {
+      "scenario": "S4",
+      "description": "Every fifth frame, submit the latest frame only while NPU is idle",
+      "ai_enabled": true,
+      "trigger_interval": 5,
+      "submit_policy": "latest_if_idle",
+      "thresholds": {
+        "max_inference_queue": 1
+      }
+    },
+    {
+      "scenario": "S5",
+      "description": "Long stability run using the S4 policy selected from three-run S3/S4 measurements",
+      "duration_sec": 1800,
+      "ai_enabled": true,
+      "trigger_interval": 5,
+      "submit_policy": "latest_if_idle",
+      "thresholds": {
+        "max_inference_queue": 1
+      }
+    }
+  ]
+}

@@ -5,6 +5,16 @@
 #include "drmrga.h"
 #include "rga_overlay_helper.h"
 
+#ifndef RGA_OVERLAY_LOG_ENABLE
+#define RGA_OVERLAY_LOG_ENABLE 0
+#endif
+
+#if RGA_OVERLAY_LOG_ENABLE
+#define RGA_OVERLAY_LOG(...) do { printf(__VA_ARGS__); } while (0)
+#else
+#define RGA_OVERLAY_LOG(...) do { } while (0)
+#endif
+
 static int make_nv12_fill_color(unsigned char y_value)
 {
     int color = 0;
@@ -32,7 +42,7 @@ int rga_nv12_fill_rect_fd(int dma_fd, int width, int height,
     if (ret <= 0) {
         static int warn_count = 0;
         if (warn_count < 5) {
-            printf("[rga] imfill failed: %s\n", imStrError((IM_STATUS)ret));
+            RGA_OVERLAY_LOG("[rga] imfill failed: %s\n", imStrError((IM_STATUS)ret));
             warn_count++;
         }
         return -1;

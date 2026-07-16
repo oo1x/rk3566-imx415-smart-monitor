@@ -1,4 +1,4 @@
-// Copyright (c) 2024 by Rockchip Electronics Co., Ltd. All Rights Reserved.
+﻿// Copyright (c) 2024 by Rockchip Electronics Co., Ltd. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,17 @@
 
 #include <set>
 #include <vector>
+
+#ifndef RKNN_POST_LOG_ENABLE
+#define RKNN_POST_LOG_ENABLE 0
+#endif
+
+#if RKNN_POST_LOG_ENABLE
+#define RKNN_POST_LOG(...) do { printf(__VA_ARGS__); } while (0)
+#else
+#define RKNN_POST_LOG(...) do { } while (0)
+#endif
+
 #define LABEL_NALE_TXT_PATH "./model/coco_80_labels_list.txt"
 
 static char *labels[OBJ_CLASS_NUM];
@@ -75,7 +86,7 @@ static int readLines(const char *fileName, char *lines[], int max_line)
 
     if (file == NULL)
     {
-        printf("Open %s fail!\n", fileName);
+        RKNN_POST_LOG("Open %s fail!\n", fileName);
         return -1;
     }
 
@@ -91,7 +102,7 @@ static int readLines(const char *fileName, char *lines[], int max_line)
 
 static int loadLabelName(const char *locationFilename, char *label[])
 {
-    printf("load lable %s\n", locationFilename);
+    RKNN_POST_LOG("load lable %s\n", locationFilename);
     readLines(locationFilename, label, OBJ_CLASS_NUM);
     return 0;
 }
@@ -318,7 +329,7 @@ static int process_i8(int8_t *box_tensor, int32_t box_zp, float box_scale,
             int offset = i* grid_w + j;
             int max_class_id = -1;
 
-            // 通过 score sum 起到快速过滤的作用
+            // 閫氳繃 score sum 璧峰埌蹇€熻繃婊ょ殑浣滅敤
             if (score_sum_tensor != nullptr){
                 if (score_sum_tensor[offset] < score_sum_thres_i8){
                     continue;
@@ -480,7 +491,7 @@ static int process_fp32(float *box_tensor, float *score_tensor, float *score_sum
             int offset = i* grid_w + j;
             int max_class_id = -1;
 
-            // 通过 score sum 起到快速过滤的作用
+            // 閫氳繃 score sum 璧峰埌蹇€熻繃婊ょ殑浣滅敤
             if (score_sum_tensor != nullptr){
                 if (score_sum_tensor[offset] < threshold){
                     continue;
@@ -549,7 +560,7 @@ static int process_i8_rv1106(int8_t *box_tensor, int32_t box_zp, float box_scale
             int offset = i * grid_w + j;
             int max_class_id = -1;
 
-            // 通过 score sum 起到快速过滤的作用
+            // 閫氳繃 score sum 璧峰埌蹇€熻繃婊ょ殑浣滅敤
             if (score_sum_tensor != nullptr) {
                 //score_sum_tensor [1, 1, 80, 80]
                 if (score_sum_tensor[offset] < score_sum_thres_i8) {
@@ -561,7 +572,7 @@ static int process_i8_rv1106(int8_t *box_tensor, int32_t box_zp, float box_scale
             offset = offset * OBJ_CLASS_NUM;
             for (int c = 0; c < OBJ_CLASS_NUM; c++) {
                 if ((score_tensor[offset + c] > score_thres_i8) && (score_tensor[offset + c] > max_score)) {
-                    max_score = score_tensor[offset + c]; //80类 [1, 80, 80, 80] 3588NCHW 1106NHWC
+                    max_score = score_tensor[offset + c]; //80绫?[1, 80, 80, 80] 3588NCHW 1106NHWC
                     max_class_id = c;
                 }
             }
@@ -594,8 +605,8 @@ static int process_i8_rv1106(int8_t *box_tensor, int32_t box_zp, float box_scale
             }
         }
     }
-    printf("validCount=%d\n", validCount);
-    printf("grid h-%d, w-%d, stride %d\n", grid_h, grid_w, stride);
+    RKNN_POST_LOG("validCount=%d\n", validCount);
+    RKNN_POST_LOG("grid h-%d, w-%d, stride %d\n", grid_h, grid_w, stride);
     return validCount;
 }
 #endif
@@ -652,7 +663,7 @@ int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter
         }
         else
         {
-            printf("RV1106/1103 only support quantization mode\n", LABEL_NALE_TXT_PATH);
+            RKNN_POST_LOG("RV1106/1103 only support quantization mode\n", LABEL_NALE_TXT_PATH);
             return -1;
         }
 
@@ -766,7 +777,7 @@ int post_process_native(rknn_app_context_t *app_ctx, letterbox_t *letter_box, fl
 
     if (!app_ctx->is_quant)
     {
-        printf("native zero-copy post_process only supports int8 outputs\n");
+        RKNN_POST_LOG("native zero-copy post_process only supports int8 outputs\n");
         return -1;
     }
 
@@ -840,7 +851,7 @@ int post_process_native(rknn_app_context_t *app_ctx, letterbox_t *letter_box, fl
     (void)conf_threshold;
     (void)nms_threshold;
     memset(od_results, 0, sizeof(object_detect_result_list));
-    printf("post_process_native requires ZERO_COPY build\n");
+    RKNN_POST_LOG("post_process_native requires ZERO_COPY build\n");
     return -1;
 #endif
 }
@@ -851,7 +862,7 @@ int init_post_process()
     ret = loadLabelName(LABEL_NALE_TXT_PATH, labels);
     if (ret < 0)
     {
-        printf("Load %s failed!\n", LABEL_NALE_TXT_PATH);
+        RKNN_POST_LOG("Load %s failed!\n", LABEL_NALE_TXT_PATH);
         return -1;
     }
     return 0;

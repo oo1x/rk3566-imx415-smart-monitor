@@ -4,6 +4,8 @@
 
 项目当前重点在端侧开发，服务端转发和客户端预览可作为完整监控系统的其他模块。本仓库主要保留 RK3566 端侧相关源码和说明文档。
 
+`s4-stable-1080p60` 分支对应 2026-07-15 完成三轮实测的 S4 稳定版本：1080p60、每 5 帧触发一次推理、`latest_if_idle` 异步提交、复用最新检测框。完整配置、运行命令、实测数据和已知限制见 [`docs/S4_STABLE_1080P60_2026-07-16.md`](docs/S4_STABLE_1080P60_2026-07-16.md)。
+
 ## 功能链路
 
 ```text
@@ -42,6 +44,11 @@ yolo_integration/
 
 docs/
   PROJECT_REPORT.md                完整项目说明文档
+
+tests/performance/
+  run_benchmark.py                 S0-S5 自动化执行器
+  collect_system_metrics.py        板端资源采集器
+  analyze_metrics.py               统一统计与校验
 ```
 
 ## 当前实现方案
@@ -53,7 +60,7 @@ IMX415 通过 V4L2 subdev 接入 RKISP，驱动负责上电时序、寄存器配
 当前目标输出：
 
 ```text
-1920x1080@30fps
+1920x1080@60fps
 NV12
 /dev/video0
 ```
@@ -62,7 +69,7 @@ NV12
 
 应用层使用 V4L2 mmap buffer 取帧，并导出 DMA-BUF fd，便于 RGA / MPP 等硬件模块使用。
 
-采集优化将 V4L2 buffer 数量从 4 个减少到 2 个，降低旧帧排队。
+S4 稳定版本使用 4 个 V4L2 mmap/DMA-BUF，以覆盖采集、RGA 叠加和 MPP 编码期间的缓冲生命周期；视频交接仍采用“最新帧优先”，不建立无界旧帧队列。
 
 ### YOLO11n 端侧部署
 
@@ -76,8 +83,9 @@ MD5: 91faf3f5526db7ecfed3a61a99a3ef75
 推理策略：
 
 ```text
-每 3 帧执行一次真实 YOLO 推理
-其余帧复用最近一次检测结果
+每 5 帧形成一次 YOLO 推理触发
+仅在 NPU 空闲时提交最新帧（latest_if_idle）
+视频线程不等待推理，持续复用最近一次检测结果
 ```
 
 ### RGA 预处理
@@ -103,7 +111,7 @@ rtsp://<board-ip>:8554/live
 拉流示例：
 
 ```bash
-ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://192.168.1.20:8554/live
+ffplay -fflags nobuffer -flags low_delay -framedrop -rtsp_transport tcp rtsp://192.168.1.20:8554/live
 ```
 
 ## 编译说明
@@ -140,61 +148,56 @@ make
 
 ```bash
 cd /home/cat/latency_test
-LD_LIBRARY_PATH=/home/cat/latency_test ./imx415_yolo_rtsp_latency /dev/video0 /home/cat/latency_test/model/yolo11.rknn
+env \
+  LD_LIBRARY_PATH=. \
+  PERF_AI_ENABLED=1 \
+  PERF_INFER_INTERVAL=5 \
+  PERF_SUBMIT_POLICY=latest_if_idle \
+  PERF_REUSE_BOXES=1 \
+  PERF_DETAILED_TRACE=0 \
+  PERF_INFER_QUEUE_LIMIT=8 \
+  ./imx415_yolo_rtsp_1080p60_scripted_test \
+  /dev/video0 \
+  /home/cat/latency_test/model/yolo11.rknn
 ```
 
 PC / Ubuntu 拉流：
 
 ```bash
-ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://192.168.1.20:8554/live
+ffplay -fflags nobuffer -flags low_delay -framedrop -rtsp_transport tcp rtsp://192.168.1.20:8554/live
 ```
 
-## 延迟优化结果
+## S4 正式测试结果
 
-原始基线：
+S4 在固定场景下完成 3 轮、每轮 300 秒测试，三轮均通过：
 
 ```text
-端到端延迟：约 213-216 ms
+V4L2 采集                 60.000 fps
+板端编码输出              58.746 fps
+RTSP 客户端窗口           58.624 fps
+检测结果更新              11.748 fps
+最大推理队列              1
+框年龄 P95                150.301 ms
+板内采集到编码输出 P95     14.902 ms
+纯 NPU rknn_run P95        58.403 ms
 ```
 
-当前推荐版本：
+这里的 14.902 ms 是板内同一单调时钟下的采集到编码输出，不是客户端屏幕端到端延迟；本轮没有跨设备同步时钟或可见时间码，因此不再沿用历史文档中的约 71 ms 作为正式端到端结论。
 
-```text
-端到端延迟：约 71 ms
-```
-
-关键优化：
-
-- V4L2 buffer 数量从 4 调整为 2。
-- YOLO11n 每 3 帧推理一次，其余帧复用检测结果。
-- MPP H.264 编码改为低复杂度配置。
-- 去除冗余 memcpy。
-- RTSP RTP 包队列恢复合理大小，避免关键帧不完整。
-- 将串行链路改为采集线程与处理/编码/推流线程分离。
-- 多线程版本进一步采用 V4L2 buffer 直通交接，减少应用层帧池拷贝和旧帧等待。
-
-当前典型耗时：
-
-```text
-采集到应用层取帧：25-26 ms
-YOLO 每帧平均：28-29 ms
-YOLO 单次真实推理：85-88 ms
-MPP 编码：12 ms
-Sensor timestamp 到 RTSP 发送：约 71 ms
-```
+关键改动包括异步推理、最新帧空闲提交、DMA-BUF 编码、RTSP 非阻塞发送游标修复、60 fps 有理数 RTP 时间戳和每秒周期 IDR。详细证据与限制见 S4 稳定版本说明。
 
 ## NPU 频率分析
 
-当前发现 RK3566 NPU 默认运行在 600 MHz：
+正式 S4 测试将 NPU 固定在 600 MHz userspace governor：
 
 ```text
 cur_freq = 600000000
 max_freq = 900000000
-governor = rknpu_ondemand
-load = 100@600000000Hz
+governor = userspace
+S4 平均负载 = 49.03%
 ```
 
-临时切换 performance 后可到 900 MHz，但当前 5V2A 电源下稳定性不足。后续建议更换 5V3A 电源后进行满频测试和 RKNN profiling。
+此前临时切换 900 MHz 时在 5V2A 电源下出现稳定性不足，因此 S4 正式结论只对应 600 MHz。后续若更换 5V3A 电源，需要重新进行满频测试和 RKNN profiling。
 
 ## 文档
 
@@ -202,6 +205,7 @@ load = 100@600000000Hz
 
 ```text
 docs/PROJECT_REPORT.md
+docs/S4_STABLE_1080P60_2026-07-16.md
 ```
 
 其中包含驱动链路、V4L2 采集、YOLO11n 部署、RGA、MPP、RTSP、多线程优化、DMA-BUF、NPU 频率、量化说明、测试验证和简历表述建议。

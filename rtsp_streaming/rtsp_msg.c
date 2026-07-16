@@ -1,4 +1,4 @@
-/*************************************************************************
+﻿/*************************************************************************
 	> File Name: rtsp_msg.c
 	> Author: bxq
 	> Mail: 544177215@qq.com 
@@ -1395,34 +1395,34 @@ int main(int argc, char *argv[])
 	do {
 		ret = rtsp_msg_parse_from_array(&msg, srcbuf, srclen);
 		if (ret < 0) {
-			printf(">>>>>>>>>>1\n");
+			dbg(">>>>>>>>>>1\n");
 			break;
 		}
 		if (ret == 0) {
 			ret = read(fd, srcbuf + srclen, sizeof(srcbuf) - srclen);
 			if (ret <= 0) {
-				printf(">>>>>>>>>>>2\n");
+				dbg(">>>>>>>>>>>2\n");
 				break;
 			}
 			srclen += ret;
 			continue;
 		}
 
-		printf("ret = %d\n", ret);
+		dbg("ret = %d\n", ret);
 		memmove(srcbuf, srcbuf + ret, srclen - ret);
 		srclen -= ret;
 
 		ret = rtsp_msg_build_to_array(&msg, dstbuf, sizeof(dstbuf));
 		if (ret <= 0) {
-			printf(">>>>>>>>>>3\n");
+			dbg(">>>>>>>>>>3\n");
 			break;
 		}
-		printf("ret = %d\n", ret);
+		dbg("ret = %d\n", ret);
 		fwrite(dstbuf, ret, 1, stderr);
 		rtsp_msg_free(&msg);
 	} while (srclen || ret > 0);
 	srcbuf[srclen] = 0;
-	printf("srclen = %d\n%s", srclen, srcbuf);
+	dbg("srclen = %d\n%s", srclen, srcbuf);
 
 	close(fd);
 	return 0;

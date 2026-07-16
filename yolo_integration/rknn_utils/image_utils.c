@@ -1,4 +1,4 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <dirent.h>
 #include <math.h>
@@ -18,6 +18,16 @@
 
 #include "image_utils.h"
 #include "file_utils.h"
+
+#ifndef RK_DEMO_LOG_ENABLE
+#define RK_DEMO_LOG_ENABLE 0
+#endif
+
+#if RK_DEMO_LOG_ENABLE
+#define RK_DEMO_LOG(...) do { printf(__VA_ARGS__); } while (0)
+#else
+#define RK_DEMO_LOG(...) do { } while (0)
+#endif
 
 static const char* filter_image_names[] = {
     "jpg",
@@ -49,20 +59,20 @@ static int read_image_jpeg(const char* path, image_buffer_t* image)
     struct timeval tv1, tv2;
 
     if ((jpegFile = fopen(path, "rb")) == NULL) {
-        printf("open input file failure\n");
+        RK_DEMO_LOG("open input file failure\n");
     }
     if (fseek(jpegFile, 0, SEEK_END) < 0 || (size = ftell(jpegFile)) < 0 || fseek(jpegFile, 0, SEEK_SET) < 0) {
-        printf("determining input file size failure\n");
+        RK_DEMO_LOG("determining input file size failure\n");
     }
     if (size == 0) {
-        printf("determining input file size, Input file contains no data\n");
+        RK_DEMO_LOG("determining input file size, Input file contains no data\n");
     }
     jpegSize = (unsigned long)size;
     if ((jpegBuf = (unsigned char*)malloc(jpegSize * sizeof(unsigned char))) == NULL) {
-        printf("allocating JPEG buffer\n");
+        RK_DEMO_LOG("allocating JPEG buffer\n");
     }
     if (fread(jpegBuf, jpegSize, 1, jpegFile) < 1) {
-        printf("reading input file");
+        RK_DEMO_LOG("reading input file");
     }
     fclose(jpegFile);
     jpegFile = NULL;
@@ -75,23 +85,23 @@ static int read_image_jpeg(const char* path, image_buffer_t* image)
     handle = tjInitDecompress();
     ret = tjDecompressHeader3(handle, jpegBuf, size, &origin_width, &origin_height, &subsample, &colorspace);
     if (ret < 0) {
-        printf("header file error, errorStr:%s, errorCode:%d\n", tjGetErrorStr(), tjGetErrorCode(handle));
+        RK_DEMO_LOG("header file error, errorStr:%s, errorCode:%d\n", tjGetErrorStr(), tjGetErrorCode(handle));
         return -1;
     }
 
-    // 对图像做裁剪16对齐，利于后续rga操作
+    // 瀵瑰浘鍍忓仛瑁佸壀16瀵归綈锛屽埄浜庡悗缁璻ga鎿嶄綔
     int crop_width = origin_width / 16 * 16;
     int crop_height = origin_height / 16 * 16;
 
-    printf("origin size=%dx%d crop size=%dx%d\n", origin_width, origin_height, crop_width, crop_height);
+    RK_DEMO_LOG("origin size=%dx%d crop size=%dx%d\n", origin_width, origin_height, crop_width, crop_height);
 
     // gettimeofday(&tv1, NULL);
     ret = tjDecompressHeader3(handle, jpegBuf, size, &width, &height, &subsample, &colorspace);
     if (ret < 0) {
-        printf("header file error, errorStr:%s, errorCode:%d\n", tjGetErrorStr(), tjGetErrorCode(handle));
+        RK_DEMO_LOG("header file error, errorStr:%s, errorCode:%d\n", tjGetErrorStr(), tjGetErrorCode(handle));
         return -1;
     }
-    printf("input image: %d x %d, subsampling: %s, colorspace: %s, orientation: %d\n", 
+    RK_DEMO_LOG("input image: %d x %d, subsampling: %s, colorspace: %s, orientation: %d\n",
             width, height, subsampName[subsample], colorspaceName[colorspace], orientation);
     int sw_out_size = width * height * 3;
     unsigned char* sw_out_buf = image->virt_addr;
@@ -99,27 +109,28 @@ static int read_image_jpeg(const char* path, image_buffer_t* image)
         sw_out_buf = (unsigned char*)malloc(sw_out_size * sizeof(unsigned char));
     }
     if (sw_out_buf == NULL) {
-        printf("sw_out_buf is NULL\n");
+        RK_DEMO_LOG("sw_out_buf is NULL\n");
         goto out;
     }
 
     flags |= 0;
 
-    // 错误码为0时，表示警告，错误码为-1时表示错误
     int pixelFormat = TJPF_RGB;
+
+    // 閿欒鐮佷负0鏃讹紝琛ㄧず璀﹀憡锛岄敊璇爜涓?1鏃惰〃绀洪敊璇?    int pixelFormat = TJPF_RGB;
     ret = tjDecompress2(handle, jpegBuf, size, sw_out_buf, width, 0, height, pixelFormat, flags);
     // ret = tjDecompressToYUV2(handle, jpeg_buf, size, dst_buf, *width, padding, *height, flags);
     if ((0 != tjGetErrorCode(handle)) && (ret < 0)) {
-        printf("error : decompress to yuv failed, errorStr:%s, errorCode:%d\n", tjGetErrorStr(),
+        RK_DEMO_LOG("error : decompress to yuv failed, errorStr:%s, errorCode:%d\n", tjGetErrorStr(),
                tjGetErrorCode(handle));
         goto out;
     }
     if ((0 == tjGetErrorCode(handle)) && (ret < 0)) {
-        printf("warning : errorStr:%s, errorCode:%d\n", tjGetErrorStr(), tjGetErrorCode(handle));
+        RK_DEMO_LOG("warning : errorStr:%s, errorCode:%d\n", tjGetErrorStr(), tjGetErrorCode(handle));
     }
     tjDestroy(handle);
     // gettimeofday(&tv2, NULL);
-    // printf("decode time %ld ms\n", (tv2.tv_sec-tv1.tv_sec)*1000 + (tv2.tv_usec-tv1.tv_usec)/1000);
+    // RK_DEMO_LOG("decode time %ld ms\n", (tv2.tv_sec-tv1.tv_sec)*1000 + (tv2.tv_usec-tv1.tv_usec)/1000);
 
     image->width = width;
     image->height = height;
@@ -151,11 +162,11 @@ static int write_image_jpeg(const char* path, int quality, const image_buffer_t*
     if (image->format == IMAGE_FORMAT_RGB888) {
         ret = tjCompress2(handle, data, width, 0, height, pixelFormat, &jpegBuf, &jpegSize, jpegSubsamp, quality, flags);
     } else {
-        printf("write_image_jpeg: pixel format %d not support\n", image->format);
+        RK_DEMO_LOG("write_image_jpeg: pixel format %d not support\n", image->format);
         return -1;
     }
 
-	// printf("ret=%d jpegBuf=%p jpegSize=%d\n", ret, jpegBuf, jpegSize);
+	// RK_DEMO_LOG("ret=%d jpegBuf=%p jpegSize=%d\n", ret, jpegBuf, jpegSize);
     if (jpegBuf != NULL && jpegSize > 0) {
         write_data_to_file(path, (const char*)jpegBuf, jpegSize);
         tjFree(jpegBuf);
@@ -182,7 +193,7 @@ static int read_image_raw(const char* path, image_buffer_t* image)
 {
     FILE *fp = fopen(path, "rb");
     if(fp == NULL) {
-        printf("fopen %s fail!\n", path);
+        RK_DEMO_LOG("fopen %s fail!\n", path);
         return -1;
     }
     fseek(fp, 0, SEEK_END);
@@ -194,7 +205,7 @@ static int read_image_raw(const char* path, image_buffer_t* image)
     data[file_size] = 0;
     fseek(fp, 0, SEEK_SET);
     if(file_size != fread(data, 1, file_size, fp)) {
-        printf("fread %s fail!\n", path);
+        RK_DEMO_LOG("fread %s fail!\n", path);
         free(data);
         return -1;
     }
@@ -211,17 +222,17 @@ static int read_image_raw(const char* path, image_buffer_t* image)
 
 static int read_image_stb(const char* path, image_buffer_t* image)
 {
-    // 默认图像为3通道
+    // 榛樿鍥惧儚涓?閫氶亾
     int w, h, c;
     unsigned char* pixeldata = stbi_load(path, &w, &h, &c, 0);
     if (!pixeldata) {
-        printf("error: read image %s fail\n", path);
+        RK_DEMO_LOG("error: read image %s fail\n", path);
         return -1;
     }
-    // printf("load image wxhxc=%dx%dx%d path=%s\n", w, h, c, path);
+    // RK_DEMO_LOG("load image wxhxc=%dx%dx%d path=%s\n", w, h, c, path);
     int size = w * h * c;
 
-    // 设置图像数据
+    // 璁剧疆鍥惧儚鏁版嵁
     if (image->virt_addr != NULL) {
         memcpy(image->virt_addr, pixeldata, size);
         stbi_image_free(pixeldata);
@@ -266,7 +277,7 @@ int write_image(const char* path, const image_buffer_t* img)
     int height = img->height;
     int channel = 3;
     void* data = img->virt_addr;
-    printf("write_image path: %s width=%d height=%d channel=%d data=%p\n",
+    RK_DEMO_LOG("write_image path: %s width=%d height=%d channel=%d data=%p\n",
         path, width, height, channel, data);
 
     const char* _ext = strrchr(path, '.');
@@ -301,20 +312,20 @@ static int crop_and_scale_image_c(int channel, unsigned char *src, int src_width
                                     unsigned char *dst, int dst_width, int dst_height,
                                     int dst_box_x, int dst_box_y, int dst_box_width, int dst_box_height) {
     if (dst == NULL) {
-        printf("dst buffer is null\n");
+        RK_DEMO_LOG("dst buffer is null\n");
         return -1;
     }
 
     float x_ratio = (float)crop_width / (float)dst_box_width;
     float y_ratio = (float)crop_height / (float)dst_box_height;
 
-    // printf("src_width=%d src_height=%d crop_x=%d crop_y=%d crop_width=%d crop_height=%d\n",
+    // RK_DEMO_LOG("src_width=%d src_height=%d crop_x=%d crop_y=%d crop_width=%d crop_height=%d\n",
     //     src_width, src_height, crop_x, crop_y, crop_width, crop_height);
-    // printf("dst_width=%d dst_height=%d dst_box_x=%d dst_box_y=%d dst_box_width=%d dst_box_height=%d\n",
+    // RK_DEMO_LOG("dst_width=%d dst_height=%d dst_box_x=%d dst_box_y=%d dst_box_width=%d dst_box_height=%d\n",
     //     dst_width, dst_height, dst_box_x, dst_box_y, dst_box_width, dst_box_height);
-    // printf("channel=%d x_ratio=%f y_ratio=%f\n", channel, x_ratio, y_ratio);
+    // RK_DEMO_LOG("channel=%d x_ratio=%f y_ratio=%f\n", channel, x_ratio, y_ratio);
 
-    // 从原图指定区域取数据，双线性缩放到目标指定区域
+    // 浠庡師鍥炬寚瀹氬尯鍩熷彇鏁版嵁锛屽弻绾挎€х缉鏀惧埌鐩爣鎸囧畾鍖哄煙
     for (int dst_y = dst_box_y; dst_y < dst_box_y + dst_box_height; dst_y++) {
         for (int dst_x = dst_box_x; dst_x < dst_box_x + dst_box_width; dst_x++) {
             int dst_x_offset = dst_x - dst_box_x;
@@ -329,18 +340,16 @@ static int crop_and_scale_image_c(int channel, unsigned char *src, int src_width
             int index1 = src_y * src_width * channel + src_x * channel;
             int index2 = index1 + src_width * channel;    // down
             if (src_y == src_height - 1) {
-                // 如果到图像最下边缘，变成选择上面的像素
-                index2 = index1 - src_width * channel;
+                // 濡傛灉鍒板浘鍍忔渶涓嬭竟缂橈紝鍙樻垚閫夋嫨涓婇潰鐨勫儚绱?                index2 = index1 - src_width * channel;
             }
             int index3 = index1 + 1 * channel;            // right
             int index4 = index2 + 1 * channel;            // down right
             if (src_x == src_width - 1) {
-                // 如果到图像最右边缘，变成选择左边的像素
-                index3 = index1 - 1 * channel;
+                // 濡傛灉鍒板浘鍍忔渶鍙宠竟缂橈紝鍙樻垚閫夋嫨宸﹁竟鐨勫儚绱?                index3 = index1 - 1 * channel;
                 index4 = index2 - 1 * channel;
             }
 
-            // printf("dst_x=%d dst_y=%d dst_x_offset=%d dst_y_offset=%d src_x=%d src_y=%d x_diff=%f y_diff=%f src index=%d %d %d %d\n",
+            // RK_DEMO_LOG("dst_x=%d dst_y=%d dst_x_offset=%d dst_y_offset=%d src_x=%d src_y=%d x_diff=%f y_diff=%f src index=%d %d %d %d\n",
             //     dst_x, dst_y, dst_x_offset, dst_y_offset,
             //     src_x, src_y, x_diff, y_diff,
             //     index1, index2, index3, index4);
@@ -448,13 +457,13 @@ static int convert_image_cpu(image_buffer_t *src, image_buffer_t *dst, image_rec
             dst->virt_addr, dst->width, dst->height,
             dst_box_x, dst_box_y, dst_box_w, dst_box_h);
     } else {
-        printf("no support format %d\n", src->format);
+        RK_DEMO_LOG("no support format %d\n", src->format);
     }
     if (reti != 0) {
-        printf("convert_image_cpu fail %d\n", reti);
+        RK_DEMO_LOG("convert_image_cpu fail %d\n", reti);
         return -1;
     }
-    printf("finish\n");
+    RK_DEMO_LOG("finish\n");
     return 0;
 }
 
@@ -520,11 +529,11 @@ static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, i
     use_handle = 1;
 #endif
 
-    // printf("src width=%d height=%d fmt=0x%x virAddr=0x%p fd=%d\n",
+    // RK_DEMO_LOG("src width=%d height=%d fmt=0x%x virAddr=0x%p fd=%d\n",
     //     srcWidth, srcHeight, srcFmt, src, src_fd);
-    // printf("dst width=%d height=%d fmt=0x%x virAddr=0x%p fd=%d\n",
+    // RK_DEMO_LOG("dst width=%d height=%d fmt=0x%x virAddr=0x%p fd=%d\n",
     //     dstWidth, dstHeight, dstFmt, dst, dst_fd);
-    // printf("rotate=%d\n", rotate);
+    // RK_DEMO_LOG("rotate=%d\n", rotate);
 
     int usage = 0;
     IM_STATUS ret_rga = IM_STATUS_NOERROR;
@@ -589,7 +598,7 @@ static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, i
             rga_handle_src = importbuffer_virtualaddr(src, &in_param);
         }
         if (rga_handle_src <= 0) {
-            printf("src handle error %d\n", rga_handle_src);
+            RK_DEMO_LOG("src handle error %d\n", rga_handle_src);
             ret = -1;
             goto err;
         }
@@ -613,7 +622,7 @@ static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, i
             rga_handle_dst = importbuffer_virtualaddr(dst, &dst_param);
         }
         if (rga_handle_dst <= 0) {
-            printf("dst handle error %d\n", rga_handle_dst);
+            RK_DEMO_LOG("dst handle error %d\n", rga_handle_dst);
             ret = -1;
             goto err;
         }
@@ -636,7 +645,7 @@ static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, i
         p_imcolor[1] = color;
         p_imcolor[2] = color;
         p_imcolor[3] = color;
-        printf("fill dst image (x y w h)=(%d %d %d %d) with color=0x%x\n",
+        RK_DEMO_LOG("fill dst image (x y w h)=(%d %d %d %d) with color=0x%x\n",
             dst_whole_rect.x, dst_whole_rect.y, dst_whole_rect.width, dst_whole_rect.height, imcolor);
         ret_rga = imfill(rga_buf_dst, dst_whole_rect, imcolor);
         if (ret_rga <= 0) {
@@ -644,7 +653,7 @@ static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, i
                 size_t dst_size = get_image_size(dst_img);
                 memset(dst, color, dst_size);
             } else {
-                printf("Warning: Can not fill color on target image\n");
+                RK_DEMO_LOG("Warning: Can not fill color on target image\n");
             }
         }
     }
@@ -652,8 +661,8 @@ static int convert_image_rga(image_buffer_t* src_img, image_buffer_t* dst_img, i
     // rga process
     ret_rga = improcess(rga_buf_src, rga_buf_dst, pat, srect, drect, prect, usage);
     if (ret_rga <= 0) {
-        printf("Error on improcess STATUS=%d\n", ret_rga);
-        printf("RGA error message: %s\n", imStrError((IM_STATUS)ret_rga));
+        RK_DEMO_LOG("Error on improcess STATUS=%d\n", ret_rga);
+        RK_DEMO_LOG("RGA error message: %s\n", imStrError((IM_STATUS)ret_rga));
         ret = -1;
     }
 
@@ -666,7 +675,7 @@ err:
         releasebuffer_handle(rga_handle_dst);
     }
 
-    // printf("finish\n");
+    // RK_DEMO_LOG("finish\n");
     return ret;
 }
 
@@ -674,7 +683,7 @@ int convert_image(image_buffer_t* src_img, image_buffer_t* dst_img, image_rect_t
 {
     int ret;
 #if defined(DISABLE_RGA) 
-    printf("convert image use cpu\n");
+    RK_DEMO_LOG("convert image use cpu\n");
     ret = convert_image_cpu(src_img, dst_img, src_box, dst_box, color);
 #else
 
@@ -685,11 +694,11 @@ int convert_image(image_buffer_t* src_img, image_buffer_t* dst_img, image_rect_t
 #endif
         ret = convert_image_rga(src_img, dst_img, src_box, dst_box, color);
         if (ret != 0) {
-            printf("try convert image use cpu\n");
+            RK_DEMO_LOG("try convert image use cpu\n");
             ret = convert_image_cpu(src_img, dst_img, src_box, dst_box, color);
         }
     } else {
-        printf("src width is not 4/16-aligned, convert image use cpu\n");
+        RK_DEMO_LOG("src width is not 4/16-aligned, convert image use cpu\n");
         ret = convert_image_cpu(src_img, dst_img, src_box, dst_box, color);
     }
 #endif
@@ -767,7 +776,7 @@ int convert_image_with_letterbox(image_buffer_t* src_image, image_buffer_t* dst_
         dst_box.right = dst_box.left + resize_w - 1;
         _left_offset = dst_box.left;
     }
-    printf("scale=%f dst_box=(%d %d %d %d) allow_slight_change=%d _left_offset=%d _top_offset=%d padding_w=%d padding_h=%d\n",
+    RK_DEMO_LOG("scale=%f dst_box=(%d %d %d %d) allow_slight_change=%d _left_offset=%d _top_offset=%d padding_w=%d padding_h=%d\n",
         scale, dst_box.left, dst_box.top, dst_box.right, dst_box.bottom, allow_slight_change,
         _left_offset, _top_offset, padding_w, padding_h);
 
@@ -783,7 +792,7 @@ int convert_image_with_letterbox(image_buffer_t* src_image, image_buffer_t* dst_
         int dst_size = get_image_size(dst_image);
         dst_image->virt_addr = (uint8_t *)malloc(dst_size);
         if (dst_image->virt_addr == NULL) {
-            printf("malloc size %d error\n", dst_size);
+            RK_DEMO_LOG("malloc size %d error\n", dst_size);
             return -1;
         }
     }

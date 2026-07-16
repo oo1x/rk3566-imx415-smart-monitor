@@ -10,10 +10,21 @@
 
 #include <stdio.h>
 
+#ifndef RTSP_LOG_ENABLE
+#define RTSP_LOG_ENABLE 0
+#endif
+
+#if RTSP_LOG_ENABLE
 #define dbg(fmt, ...) do {printf("[DEBUG %s:%d:%s] " fmt, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__);} while(0)
 #define info(fmt, ...) do {printf("[INFO  %s:%d:%s] " fmt, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__);} while(0)
 #define warn(fmt, ...) do {printf("[WARN  %s:%d:%s] " fmt, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__);} while(0)
 #define err(fmt, ...) do {printf("[ERROR %s:%d:%s] " fmt, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__);} while(0)
+#else
+#define dbg(fmt, ...) do { } while(0)
+#define info(fmt, ...) do { } while(0)
+#define warn(fmt, ...) do { } while(0)
+#define err(fmt, ...) do { } while(0)
+#endif
 
 #ifdef __WIN32__
 #define FD_SETSIZE 1024
@@ -32,4 +43,3 @@
 #endif 
 
 #endif
-

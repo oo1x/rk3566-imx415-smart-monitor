@@ -1,10 +1,21 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "image_drawing.h"
 #include "font.h"
+
+#ifndef IMAGE_DRAWING_LOG_ENABLE
+#define IMAGE_DRAWING_LOG_ENABLE 0
+#endif
+
+#if IMAGE_DRAWING_LOG_ENABLE
+#define IMAGE_DRAWING_LOG(...) do { printf(__VA_ARGS__); } while (0)
+#else
+#define IMAGE_DRAWING_LOG(...) do { } while (0)
+#endif
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #define min(a, b) (((a) < (b)) ? (a) : (b))
@@ -17,7 +28,7 @@ static int clamp(float val, int min, int max)
 // src color format(ARGB888) To dest format color
 static unsigned int convert_color(unsigned int src_color, image_format_t dst_fmt)
 {
-    // printf("sizeof(int)=%d\n", sizeof(int));
+    // IMAGE_DRAWING_LOG("sizeof(int)=%d\n", sizeof(int));
     unsigned int dst_color = 0x0;
     unsigned char* p_src_color = (unsigned char*)&src_color;
     unsigned char* p_dst_color = (unsigned char*)&dst_color;
@@ -1452,7 +1463,7 @@ static void draw_image_c2(unsigned char* pixels, int w, int h, unsigned char* dr
 
 static void draw_image_c3(unsigned char* pixels, int w, int h, unsigned char* draw_img, int x, int y, int rw, int rh)
 {
-    printf("draw_image_c3 pixels=%p wxh=%dx%d draw_img=%p pos=(%d %d) rwxrh=%dx%d\n", pixels, w, h, draw_img, x, y, rw, rh);
+    IMAGE_DRAWING_LOG("draw_image_c3 pixels=%p wxh=%dx%d draw_img=%p pos=(%d %d) rwxrh=%dx%d\n", pixels, w, h, draw_img, x, y, rw, rh);
     for (int i = 0; i < rh; i++) {
         memcpy(pixels + ((y + i) * w + x) * 3,  draw_img + i * rw * 3,  rw * 3);
     }
@@ -1480,9 +1491,9 @@ void draw_rectangle(image_buffer_t* image, int rx, int ry, int rw, int rh, unsig
     int h = image->height;
 
     unsigned int draw_color = convert_color(color, format);
-    // printf("draw_color=%x\n", draw_color);
+    // IMAGE_DRAWING_LOG("draw_color=%x\n", draw_color);
 
-    // printf("draw_rectangle format=%d rx=%d ry=%d rw=%d rh=%d color=0x%x thickness=%d\n",
+    // IMAGE_DRAWING_LOG("draw_rectangle format=%d rx=%d ry=%d rw=%d rh=%d color=0x%x thickness=%d\n",
     //     format, rx, ry, rw, rh, color, thickness);
     switch (format)
     {
@@ -1497,7 +1508,7 @@ void draw_rectangle(image_buffer_t* image, int rx, int ry, int rw, int rh, unsig
         draw_rectangle_yuv420sp(pixels, w, h, rx, ry, rw, rh, draw_color, thickness);
         break;
     default:
-        printf("no support format %d", format);
+        IMAGE_DRAWING_LOG("no support format %d", format);
         break;
     }
 }
@@ -1525,14 +1536,14 @@ void draw_line(image_buffer_t* image, int x0, int y0, int x1, int y1, unsigned i
         draw_line_yuv420sp(pixels, w, h, x0, y0, x1, y1, draw_color, thickness);
         break;
     default:
-        printf("no support format %d", format);
+        IMAGE_DRAWING_LOG("no support format %d", format);
         break;
     }
 }
 
 void rbbox_to_corners(const float *in_rbbox, int *out_rbbox) {
     // generate clockwise corners and rotate it clockwise
-    // 顺时针方向返回角点位置
+    // Return the four rotated corners in clockwise order.
     float cx = in_rbbox[0] + in_rbbox[2] / 2;
     float cy = in_rbbox[1] + in_rbbox[3] / 2;
     float x_d = in_rbbox[2];
@@ -1583,7 +1594,7 @@ void draw_text(image_buffer_t* image, const char* text, int x, int y, unsigned i
         draw_text_yuv420sp(pixels, w, h, text, x, y, fontsize, draw_color);
         break;
     default:
-        printf("no support format %d", format);
+        IMAGE_DRAWING_LOG("no support format %d", format);
         break;
     }
 }
@@ -1610,7 +1621,7 @@ void draw_circle(image_buffer_t* image, int cx, int cy, int radius, unsigned int
         draw_circle_yuv420sp(pixels, w, h, cx, cy, radius, draw_color, thickness);
         break;
     default:
-        printf("no support format %d", format);
+        IMAGE_DRAWING_LOG("no support format %d", format);
         break;
     }
 }
@@ -1635,7 +1646,7 @@ void draw_image(image_buffer_t* image, unsigned char* draw_img, int x, int y, in
         draw_image_yuv420sp(pixels, w, h, draw_img, x, y, rw, rh);
         break;
     default:
-        printf("no support format %d", format);
+        IMAGE_DRAWING_LOG("no support format %d", format);
         break;
     }
 }

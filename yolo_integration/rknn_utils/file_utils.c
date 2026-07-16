@@ -1,14 +1,24 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MAX_TEXT_LINE_LENGTH 1024
 
+#ifndef FILE_UTILS_LOG_ENABLE
+#define FILE_UTILS_LOG_ENABLE 0
+#endif
+
+#if FILE_UTILS_LOG_ENABLE
+#define FILE_UTILS_LOG(...) do { printf(__VA_ARGS__); } while (0)
+#else
+#define FILE_UTILS_LOG(...) do { } while (0)
+#endif
+
 unsigned char* load_model(const char* filename, int* model_size)
 {
     FILE* fp = fopen(filename, "rb");
     if (fp == NULL) {
-        printf("fopen %s fail!\n", filename);
+        FILE_UTILS_LOG("fopen %s fail!\n", filename);
         return NULL;
     }
     fseek(fp, 0, SEEK_END);
@@ -16,7 +26,7 @@ unsigned char* load_model(const char* filename, int* model_size)
     unsigned char* model = (unsigned char*)malloc(model_len);
     fseek(fp, 0, SEEK_SET);
     if (model_len != fread(model, 1, model_len, fp)) {
-        printf("fread %s fail!\n", filename);
+        FILE_UTILS_LOG("fread %s fail!\n", filename);
         free(model);
         fclose(fp);
         return NULL;
@@ -30,7 +40,7 @@ int read_data_from_file(const char *path, char **out_data)
 {
     FILE *fp = fopen(path, "rb");
     if(fp == NULL) {
-        printf("fopen %s fail!\n", path);
+        FILE_UTILS_LOG("fopen %s fail!\n", path);
         return -1;
     }
     fseek(fp, 0, SEEK_END);
@@ -39,7 +49,7 @@ int read_data_from_file(const char *path, char **out_data)
     data[file_size] = 0;
     fseek(fp, 0, SEEK_SET);
     if(file_size != fread(data, 1, file_size, fp)) {
-        printf("fread %s fail!\n", path);
+        FILE_UTILS_LOG("fread %s fail!\n", path);
         free(data);
         fclose(fp);
         return -1;
@@ -57,7 +67,7 @@ int write_data_to_file(const char *path, const char *data, unsigned int size)
 
     fp = fopen(path, "w");
     if(fp == NULL) {
-        printf("open error: %s\n", path);
+        FILE_UTILS_LOG("open error: %s\n", path);
         return -1;
     }
 
@@ -91,12 +101,12 @@ char** read_lines_from_file(const char* filename, int* line_count)
 {
     FILE* file = fopen(filename, "r");
     if (file == NULL) {
-        printf("Failed to open the file.\n");
+        FILE_UTILS_LOG("Failed to open the file.\n");
         return NULL;
     }
 
     int num_lines = count_lines(file);
-    printf("num_lines=%d\n", num_lines);
+    FILE_UTILS_LOG("num_lines=%d\n", num_lines);
     char** lines = (char**)malloc(num_lines * sizeof(char*));
     memset(lines, 0, num_lines * sizeof(char*));
 
@@ -104,8 +114,7 @@ char** read_lines_from_file(const char* filename, int* line_count)
     int line_index = 0;
 
     while (fgets(buffer, sizeof(buffer), file) != NULL) {
-        buffer[strcspn(buffer, "\n")] = '\0';  // 移除换行符
-
+        buffer[strcspn(buffer, "\n")] = '\0';  // 绉婚櫎鎹㈣绗?
         lines[line_index] = (char*)malloc(strlen(buffer) + 1);
         strcpy(lines[line_index], buffer);
 

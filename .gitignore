@@ -13,3 +13,7 @@ demo
 BarbieGirl.*
 obj/
 build/
+__pycache__/
+*.py[cod]
+tests/performance/results/
+imx415_yolo_rtsp_*
