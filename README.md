@@ -197,7 +197,9 @@ governor = userspace
 S4 平均负载 = 49.03%
 ```
 
-此前临时切换 900 MHz 时在 5V2A 电源下出现稳定性不足，因此 S4 正式结论只对应 600 MHz。后续若更换 5V3A 电源，需要重新进行满频测试和 RKNN profiling。
+当前供电已由用户确认为 5V3A。2026-07-16 的补充实测在 600/900 MHz 各完成一轮约 121 秒的关闭 profiling 对照，并分别采集 RKNN 逐层 profiling：900 MHz 将 NPU 执行 P50 从 56.076 ms 降至 49.303 ms（-12.08%），但模型注意力模块仍有约 10 ms 的 CPU Softmax，完整 RKNN profiling 只从 70.072 ms 降至 65.314 ms（-6.79%）。900 MHz 正式窗口最高 63.333°C、未触发 85°C 保护；这证明短测可运行，不等同于长时稳定性认证。
+
+同场景单轮中，900 MHz 的完整视频处理/RTSP 事件 FPS 没有随 NPU 加速：600 MHz 补跑为 48.084 fps，900 MHz 为 43.825 fps。RGA overlay、MPP 和共享内存带宽不会因 NPU 频率同步加速；单轮结果也不足以证明 900 MHz 必然拖慢全链路。详细边界、逐节点 P50/P95/P99 和 profiling 热点见 `docs/NPU_900MHZ_PROFILE_AND_NODE_LATENCY_2026-07-16.md`。
 
 ## 文档
 
@@ -206,6 +208,7 @@ S4 平均负载 = 49.03%
 ```text
 docs/PROJECT_REPORT.md
 docs/S4_STABLE_1080P60_2026-07-16.md
+docs/NPU_900MHZ_PROFILE_AND_NODE_LATENCY_2026-07-16.md
 ```
 
 其中包含驱动链路、V4L2 采集、YOLO11n 部署、RGA、MPP、RTSP、多线程优化、DMA-BUF、NPU 频率、量化说明、测试验证和简历表述建议。
@@ -220,8 +223,9 @@ docs/CODE_WALKTHROUGH.md
 
 ## 后续方向
 
-- 更换 5V3A 电源，验证 NPU 900 MHz 满频性能。
-- 开启 RKNN profiling，确认是否存在 CPU fallback。
+- 对 600/900 MHz 做多轮随机化 A/B，确认单轮全链路差异是否可重复。
+- 优化或替换注意力模块中的 CPU Softmax/Transpose，再复测 RKNN profiling。
+- 通过驱动 SOE、IMX415 XVS/GPIO 或外部仪器补齐曝光开始到 V4L2 EOF 的真实延迟。
 - 尝试 YOLO11n 416x416 / 320x320 输入尺寸。
 - 评估 YOLOv5n / YOLOv6n 在 RK3566 上的推理性能。
 - 使用真实监控画面重新做 INT8 calibration。

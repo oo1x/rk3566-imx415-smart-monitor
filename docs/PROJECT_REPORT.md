@@ -424,7 +424,7 @@ RK 官方 YOLO11n benchmark：约 48.5 ms
 
 因此当前 YOLO11n 推理慢于官网，很大概率不是模型版本错误，而是 NPU 默认频率未跑满。
 
-注意：板子在 900 MHz performance 状态下出现 SSH 断连，结合当前电源为 5V2A，而板子要求 5V3A，建议更换 5V3A 电源后再进行长时间满频测试和 RKNN profiling。
+更新（2026-07-16）：用户确认供电已为 5V3A。补充测试在 900 MHz 完成约 121 秒正式窗口和 RKNN profiling，最高 63.333°C，未触发 85°C 保护；测试后恢复 600 MHz。900 MHz 将关闭 profiling 的 NPU P50 从 56.076 ms 降至 49.303 ms，但逐层 profiling 发现注意力模块仍有约 10 ms 的 CPU Softmax，完整 `PERF_RUN` 只从 70.072 ms 降至 65.314 ms。该短测不等于长时稳定性认证，完整证据见 `NPU_900MHZ_PROFILE_AND_NODE_LATENCY_2026-07-16.md`。
 
 RKNN profiling 方向：
 
@@ -464,8 +464,8 @@ RKNN/NPU 真推理：约 72 到 74 ms @ 600 MHz
 
 因此后续若要继续明显降低延迟，优先级应为：
 
-1. 更换 5V3A 电源，保证 NPU 可以稳定 900 MHz 满频。
-2. 进行 RKNN profiling，确认是否存在 CPU fallback。
+1. 对 600/900 MHz 做多轮随机化 A/B，确认单轮整链路差异是否可重复。
+2. 优化或替换注意力模块中的 CPU Softmax/Transpose，并重新 profiling。
 3. 尝试 YOLO11n 416x416 或 320x320 输入尺寸。
 4. 若不强制 YOLO11，评估 YOLOv5n / YOLOv6n。
 5. 使用真实监控场景数据重新 INT8 量化校准，提升场景精度稳定性。
@@ -567,7 +567,7 @@ ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://192.168.1.20:8554/liv
 
 原因：NPU 默认 600 MHz，未跑到 900 MHz 满频。
 
-解决方向：更换 5V3A 电源后测试 performance governor 和 RKNN profiling。
+2026-07-16 复测：5V3A 条件下 900 MHz 的 NPU 段有约 12% 收益，但 CPU Softmax/Transpose 限制了完整 RKNN 收益；后续方向改为 CPU 算子与模型图优化，并做多轮全链路 A/B。
 
 ## 19. 项目亮点
 
