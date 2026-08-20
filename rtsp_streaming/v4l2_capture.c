@@ -1,4 +1,4 @@
-#include "v4l2_capture.h"
+﻿#include "v4l2_capture.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +10,16 @@
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <linux/videodev2.h>
+
+#ifndef V4L2_LOG_ENABLE
+#define V4L2_LOG_ENABLE 0
+#endif
+
+#if V4L2_LOG_ENABLE
+#define V4L2_LOG(...) do { printf(__VA_ARGS__); } while (0)
+#else
+#define V4L2_LOG(...) do { } while (0)
+#endif
 
 static int xioctl(int fd, unsigned long req, void *arg)
 {
@@ -29,7 +39,7 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
     ctx->width  = width;
     ctx->height = height;
 
-    /* 初始化dma_fd为-1，表示未导出 */
+    /* 鍒濆鍖杁ma_fd涓?1锛岃〃绀烘湭瀵煎嚭 */
     for (i = 0; i < BUF_COUNT; i++)
         ctx->bufs[i].plane[0].dma_fd = -1;
 
@@ -39,9 +49,9 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
     if (xioctl(ctx->fd, VIDIOC_QUERYCAP, &cap) < 0) {
         perror("VIDIOC_QUERYCAP"); goto err;
     }
-    printf("[v4l2] driver=%s card=%s\n", cap.driver, cap.card);
+    V4L2_LOG("[v4l2] driver=%s card=%s\n", cap.driver, cap.card);
 
-    /* S_FMT：设置NV12格式 */
+    /* S_FMT锛氳缃甆V12鏍煎紡 */
     memset(&fmt, 0, sizeof(fmt));
     fmt.type                   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     fmt.fmt.pix_mp.width       = width;
@@ -53,10 +63,10 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
         perror("VIDIOC_S_FMT"); goto err;
     }
     ctx->num_planes = fmt.fmt.pix_mp.num_planes;
-    printf("[v4l2] NV12 %dx%d planes=%d\n",
+    V4L2_LOG("[v4l2] NV12 %dx%d planes=%d\n",
            fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height, ctx->num_planes);
 
-    /* REQBUFS：申请MMAP类型buffer */
+    /* REQBUFS锛氱敵璇稭MAP绫诲瀷buffer */
     memset(&req, 0, sizeof(req));
     req.count  = BUF_COUNT;
     req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -66,10 +76,10 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
     }
 
     /* QUERYBUF + mmap + EXPBUF
-     * mmap：建立CPU访问的虚拟地址映射（零拷贝访问）
-     * EXPBUF：把同一块DMA buffer导出为fd
-     *         这个fd可以传给MPP，让硬件编码器直接访问
-     *         不需要memcpy */
+     * mmap锛氬缓绔婥PU璁块棶鐨勮櫄鎷熷湴鍧€鏄犲皠锛堥浂鎷疯礉璁块棶锛?
+     * EXPBUF锛氭妸鍚屼竴鍧桪MA buffer瀵煎嚭涓篺d
+     *         杩欎釜fd鍙互浼犵粰MPP锛岃纭欢缂栫爜鍣ㄧ洿鎺ヨ闂?
+     *         涓嶉渶瑕乵emcpy */
     for (i = 0; i < BUF_COUNT; i++) {
         struct v4l2_buffer      buf;
         struct v4l2_plane       planes[VIDEO_MAX_PLANES];
@@ -89,7 +99,7 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
         }
 
         for (p = 0; p < ctx->num_planes; p++) {
-            /* mmap：建立虚拟地址到DMA物理页的映射 */
+            /* mmap锛氬缓绔嬭櫄鎷熷湴鍧€鍒癉MA鐗╃悊椤电殑鏄犲皠 */
             ctx->bufs[i].plane[p].length = planes[p].length;
             ctx->bufs[i].plane[p].start  = mmap(
                 NULL, planes[p].length,
@@ -99,9 +109,9 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
                 perror("mmap"); goto err;
             }
 
-            /* EXPBUF：把同一块DMA buffer导出为DMA-BUF fd
-             * 这个fd和mmap指向同一块物理内存
-             * 传给MPP后，MPP通过IOMMU直接访问，省掉memcpy */
+            /* EXPBUF锛氭妸鍚屼竴鍧桪MA buffer瀵煎嚭涓篋MA-BUF fd
+             * 杩欎釜fd鍜宮map鎸囧悜鍚屼竴鍧楃墿鐞嗗唴瀛?
+             * 浼犵粰MPP鍚庯紝MPP閫氳繃IOMMU鐩存帴璁块棶锛岀渷鎺塵emcpy */
             memset(&expbuf, 0, sizeof(expbuf));
             expbuf.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
             expbuf.index = i;
@@ -109,19 +119,19 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
             expbuf.flags = O_CLOEXEC | O_RDWR;
 
             if (xioctl(ctx->fd, VIDIOC_EXPBUF, &expbuf) < 0) {
-                /* EXPBUF失败不影响mmap正常工作
-                 * 退化为普通mmap模式，由上层决定是否memcpy */
+                /* EXPBUF澶辫触涓嶅奖鍝峬map姝ｅ父宸ヤ綔
+                 * 閫€鍖栦负鏅€歮map妯″紡锛岀敱涓婂眰鍐冲畾鏄惁memcpy */
                 perror("VIDIOC_EXPBUF (will fallback to memcpy)");
                 ctx->bufs[i].plane[p].dma_fd = -1;
             } else {
                 ctx->bufs[i].plane[p].dma_fd = expbuf.fd;
-                printf("[v4l2] buf[%d] plane[%d] dma_fd=%d size=%d\n",
+                V4L2_LOG("[v4l2] buf[%d] plane[%d] dma_fd=%d size=%d\n",
                        i, p, expbuf.fd, planes[p].length);
             }
         }
     }
 
-    /* QBUF：所有buffer入队 */
+    /* QBUF锛氭墍鏈塨uffer鍏ラ槦 */
     for (i = 0; i < BUF_COUNT; i++) {
         struct v4l2_buffer  buf;
         struct v4l2_plane   planes[VIDEO_MAX_PLANES];
@@ -143,7 +153,7 @@ int v4l2_open(v4l2_ctx_t *ctx, const char *dev, int width, int height)
         perror("VIDIOC_STREAMON"); goto err;
     }
 
-    printf("[v4l2] opened %s OK\n", dev);
+    V4L2_LOG("[v4l2] opened %s OK\n", dev);
     return 0;
 err:
     close(ctx->fd);
@@ -176,7 +186,7 @@ int v4l2_read_frame(v4l2_ctx_t *ctx, void **data, int *size, int *index)
         perror("VIDIOC_DQBUF"); return -1;
     }
 
-    /* 丢帧策略：只保留最新帧 */
+    /* 涓㈠抚绛栫暐锛氬彧淇濈暀鏈€鏂板抚 */
     while (1) {
         memset(&tmp,       0, sizeof(tmp));
         memset(tmp_planes, 0, sizeof(tmp_planes));

@@ -33,6 +33,7 @@ typedef struct {
     int            hor_stride;
     int            ver_stride;
     int            frame_count;
+    int            fps;
 
     /* last-frame fine-grained encoder timing, unit: us */
     int64_t        last_prepare_us;

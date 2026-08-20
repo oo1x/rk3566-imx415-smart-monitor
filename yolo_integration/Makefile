@@ -57,6 +57,7 @@ C_SRCS = $(RTSP_DIR)/rtsp_demo.c \
          $(RTSP_DIR)/utils.c \
          $(RTSP_DIR)/v4l2_capture.c \
          $(RTSP_DIR)/mpp_encoder.c \
+         rga_overlay_helper.c \
          $(RKNN_UTILS)/image_utils.c \
          $(RKNN_UTILS)/image_drawing.c \
          $(RKNN_UTILS)/file_utils.c \
@@ -70,7 +71,7 @@ C_OBJS   = $(addprefix obj/, $(notdir $(C_SRCS:.c=.o)))
 CXX_OBJS = $(addprefix obj/, $(notdir $(CXX_SRCS:.cpp=.o)))
 CXX_OBJS := $(CXX_OBJS:.cc=.o)
 
-TARGET = imx415_yolo_rtsp
+TARGET ?= imx415_yolo_rtsp
 
 all: obj $(TARGET)
 
@@ -90,6 +91,9 @@ obj/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # RTSP和MPP的C文件
+obj/%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 obj/%.o: $(RTSP_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 

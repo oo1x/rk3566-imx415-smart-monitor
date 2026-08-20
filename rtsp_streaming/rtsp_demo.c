@@ -1859,7 +1859,6 @@ int rtsp_tx_video (rtsp_session_handle session, const uint8_t *frame, int len, u
 	int  pktsizs[VRTP_MAX_NBPKTS+1] = {0};
 	int *pktlens[VRTP_MAX_NBPKTS] = {NULL};
 	int i, index, count, start;
-	int frame_start_index;
 
 	if (!s || !frame || s->vcodec_id == RTSP_CODEC_ID_NONE)
 		return -1;
@@ -1870,7 +1869,6 @@ int rtsp_tx_video (rtsp_session_handle session, const uint8_t *frame, int len, u
 	//get free buffer
 	q = s->vstreamq;
 	index = streamq_tail(q);
-	frame_start_index = index;
 	for (i = 0; i < VRTP_MAX_NBPKTS && i < count; i++) {
 		if (streamq_next(q, index) == streamq_head(q))
 			streamq_pop(q);
@@ -1961,12 +1959,10 @@ int rtsp_tx_video (rtsp_session_handle session, const uint8_t *frame, int len, u
 		if (cc->state != RTSP_CC_STATE_PLAYING || !rtp)
 			continue;
 
-		/* Low latency mode: drop unsent old RTP packets and send the newest frame first. */
-
-
-		rtp->streamq_index = frame_start_index;
-
-
+		/* Keep the current queue cursor so a temporarily blocked nonblocking
+		 * socket resumes the remaining RTP fragments of the same video frame.
+		 * The queue-overwrite guard above still advances genuinely slow clients
+		 * to the newest complete frame when their cursor is no longer valid. */
 		rtsp_try_tx_rtcp_sr(cc, 0, ts);
 
 
@@ -2125,4 +2121,3 @@ int rtsp_sync_audio_ts (rtsp_session_handle session, uint64_t ts, uint64_t ntpti
 	s->audio_ntptime_of_zero_ts = ntptime - ts; //XXX
 	return 0;
 }
-

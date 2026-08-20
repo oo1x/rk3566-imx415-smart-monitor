@@ -53,6 +53,11 @@ typedef struct {
     int64_t last_rknn_run_us;
     int64_t last_output_convert_us;
     int64_t last_postprocess_us;
+    int64_t last_preprocess_start_us;
+    int64_t last_preprocess_end_us;
+    int64_t last_infer_start_us;
+    int64_t last_infer_end_us;
+    int64_t last_postprocess_end_us;
 } rknn_app_context_t;
 
 #include "postprocess.h"

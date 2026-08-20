@@ -7,9 +7,9 @@
 
 #define CAPTURE_WIDTH   1920
 #define CAPTURE_HEIGHT  1080
-#define CAPTURE_FPS     30
+#define CAPTURE_FPS     60
 #define CAPTURE_DEV     "/dev/video0"
-#define BUF_COUNT       2
+#define BUF_COUNT       4
 
 typedef struct {
     void   *start;      /* mmap虚拟地址，用于CPU访问 */
