@@ -1,7 +1,9 @@
 ﻿/*
  * IMX415 + RK3566 YOLO11 intrusion demo + RTSP streaming
  * Multi-thread low-latency V4L2 handoff version.
- * Default AI policy: latest-pending (copy while NPU busy, keep one newest slot).
+ * Default AI policy: latest-pending. Copy NV12 only every YOLO_INFER_INTERVAL
+ * frames (0, 4, 8, ...); skip the frames in between. If NPU is busy the due
+ * frame overwrites the single pending slot and starts as soon as inference ends.
  */
 
 #include <stdio.h>
@@ -27,7 +29,7 @@ extern "C" {
 #define BOUNDARY_Y      540
 #define RKNN_MODEL_PATH "/mnt/nfs/rknn_yolo11_demo/model/yolo11.rknn"
 #define STAT_INTERVAL   100
-#define YOLO_INFER_INTERVAL 3
+#define YOLO_INFER_INTERVAL 4
 #define RGA_OVERLAY_THICKNESS 4
 #define APP_LOG_ENABLE 0
 
@@ -925,9 +927,7 @@ static void *process_thread_main(void *opaque)
                                 t_loop_begin - frm.dqbuf_us : 0;
 
         int ai_active = ai_is_active();
-        int wants_infer = ai_active &&
-                          (g_submit_policy == SUBMIT_LATEST_PENDING ||
-                           (frame_idx % g_infer_interval) == 0);
+        int wants_infer = ai_active && (frame_idx % g_infer_interval) == 0;
         int64_t submit_attempt_us = wants_infer ? now_us() : 0;
         int infer_queue_depth = ai_async_queue_depth(ai);
         int submit_result = wants_infer ?
