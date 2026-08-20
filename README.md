@@ -1,224 +1,139 @@
-# RK3566 IMX415 智能监控视频采集与 RTSP 推流系统
+# RK3566 IMX415 智能监控视频采集与 RTSP 推流
 
-本项目面向智慧社区智能监控场景，基于 RK3566 与 IMX415 摄像头构建端侧视频链路，实现从 Sensor 采集、V4L2 取帧、YOLO11n RKNN 推理、H.264 硬件编码到 RTSP 推流的完整流程。
+基于 RK3566 + IMX415 的端侧链路：Sensor 采集、V4L2 取帧、YOLO11n 异步推理、RGA 叠框、MPP H.264、RTSP 推流。
 
-项目当前重点在端侧开发，服务端转发和客户端预览可作为完整监控系统的其他模块。本仓库主要保留 RK3566 端侧相关源码和说明文档。
+当前默认代码在分支 `latest-pending`。`main` 上仍是较早的 1080p30 / 2 buffer / 每 3 帧同步推理说明，不要和本分支混用。
+
+## 当前默认配置
+
+```text
+采集 / 编码     1920×1080 NV12 @ 60 fps
+V4L2            4 个 mmap buffer，VIDIOC_EXPBUF 导出 dma-buf fd
+视频通路        同一 fd：叠框 RGA 原地画框 → MPP 编码（零拷贝）
+AI 策略         latest-pending
+拷贝节拍        仅帧 0 / 4 / 8 … 将 NV12 拷进 pending（YOLO_INFER_INTERVAL=4）
+中间帧          只叠框和编码，不拷给 AI
+NPU 忙          到期帧覆盖唯一 pending；推理结束后立刻用 pending
+NPU 空          到期帧直接开始推理
+YOLO 输入       缩放 RGA：NV12 1080p → RGB 640×640 letterbox → rknn_run
+复用框          非推理帧叠最近一次检测结果
+编码            H.264 Baseline / CAVLC，CBR 4 Mbps，GOP 60
+IDR             约每秒 MPP_ENC_SET_IDR_FRAME（不单靠 rc:gop）
+RTSP            rtsp://<board-ip>:8554/live ，正式测试用 TCP interleaved
+```
+
+## 三线程
+
+```text
+采集线程   DQBUF → 把最新帧指针交给视频线程
+           若视频还没拿走上一帧，上一帧 QBUF 还给 ISP
+
+视频线程   到期帧：memcpy → pending
+           叠框 RGA（写 V4L2 NV12）
+           MPP 编码同一 dma-buf fd
+           QBUF 还给 ISP
+           RTSP 发送 H.264
+
+AI 线程    pending 与 work 换指针
+           缩放 RGA → RKNN 输入 dma-buf（RGB 640×640）
+           rknn_run → 发布 boxes + Frame ID
+```
+
+两条 RGA 不是同一次调用：叠框在视频线程改 1080p NV12；缩放大图在 AI 线程写 640×640 RGB。
+
+## 三块内存
+
+| Buffer | 格式 | 归属 |
+|---|---|---|
+| V4L2 ×4 | NV12 1080p dma-buf | ISP ⇄ 应用（DQBUF～QBUF）；叠框 RGA 与 MPP 共用同一 fd |
+| pending / work / scratch | NV12 1080p CPU | 仅到期帧拷入；忙则覆盖 pending |
+| RKNN input | RGB 640×640 dma-buf | 缩放写出，只给 `rknn_run` |
+
+## 运行参数
+
+默认即 `latest-pending` + 每 4 帧拷一次。可用环境变量覆盖：
+
+```text
+PERF_AI_ENABLED=1
+PERF_SUBMIT_POLICY=latest_pending   # 或 latest_if_idle / always_queue / disabled
+PERF_INFER_INTERVAL=4
+PERF_REUSE_BOXES=1
+PERF_INFER_QUEUE_LIMIT=8            # 仅 always_queue 过载保护
+```
+
+`latest_if_idle`：到期帧若 NPU 忙则跳过，不存 pending（S4 实测用的是这个，间隔为 5）。
 
 ## 功能链路
 
 ```text
-IMX415 Sensor
-  -> MIPI CSI-2
-  -> RKISP / V4L2
-  -> V4L2 DQBUF 取帧
-  -> RGA letterbox 预处理
-  -> RKNN / NPU YOLO11n 推理
-  -> 检测框
-  -> MPP H.264 硬件编码
-  -> RTSP 推流
-  -> ffplay 局域网预览
+IMX415 RAW10 1944×1096
+  → MIPI CSI-2
+  → RKISP crop 1920×1080 NV12
+  → V4L2 4× DMA-BUF
+      ├─ 视频线程：叠框 RGA → MPP H.264 → RTSP
+      └─ 到期帧拷贝 → AI 线程：缩放 RGA → YOLO11n → 发布框
 ```
 
-## 目录结构
+## 目录
 
 ```text
-sensor_driver/
-  imx415.c                         IMX415 V4L2 subdev 驱动
-  overlays/                        LubanCat / RK356x IMX415 设备树 overlay
-  dphy_reference/                  DPHY 调试参考源码
-
-rtsp_streaming/
-  v4l2_capture.c / h               V4L2 采集封装
-  mpp_encoder.c / h                MPP H.264 编码封装
-  rtsp_demo.c                      RTSP 服务与推流
-  imx415_rtsp.c                    基础 IMX415 RTSP 推流入口
-  Makefile.imx415                  基础推流编译脚本
-
-yolo_integration/
-  imx415_yolo_rtsp.cpp             YOLO11n + H.264 + RTSP 主程序
-  rknn_yolo11/                     RKNN YOLO11 推理与后处理
-  rknn_utils/                      RGA / 图像处理工具
-  Makefile                         YOLO 推流版本编译脚本
-
-docs/
-  PROJECT_REPORT.md                完整项目说明文档
+sensor_driver/          IMX415 V4L2 subdev、overlay、DPHY 参考
+rtsp_streaming/         V4L2、MPP、RTSP；imx415_rtsp.c 为无 YOLO 推流
+yolo_integration/       主程序 imx415_yolo_rtsp.cpp、RGA overlay、RKNN
+docs/                   讲解文档；标了日期的是历史基线，当前以本 README 为准
 ```
 
-## 当前实现方案
+## 编译
 
-### 摄像头驱动
-
-IMX415 通过 V4L2 subdev 接入 RKISP，驱动负责上电时序、寄存器配置、MIPI CSI-2 输出、pad format 协商和 stream 控制。
-
-当前目标输出：
-
-```text
-1920x1080@30fps
-NV12
-/dev/video0
-```
-
-### V4L2 采集
-
-应用层使用 V4L2 mmap buffer 取帧，并导出 DMA-BUF fd，便于 RGA / MPP 等硬件模块使用。
-
-采集优化将 V4L2 buffer 数量从 4 个减少到 2 个，降低旧帧排队。
-
-### YOLO11n 端侧部署
-
-当前模型为 RK 官方 YOLO11n INT8 RKNN 模型。
-
-```text
-yolo11.rknn
-MD5: 91faf3f5526db7ecfed3a61a99a3ef75
-```
-
-推理策略：
-
-```text
-每 3 帧执行一次真实 YOLO 推理
-其余帧复用最近一次检测结果
-```
-
-### RGA 预处理
-
-RGA 用于 YOLO 输入预处理：
-
-```text
-NV12 1920x1080 -> RGB888 640x640 letterbox
-```
-
-### MPP H.264 编码
-
-使用 Rockchip MPP 硬件编码 H.264。当前使用 Baseline + CAVLC 降低编码复杂度，并去除冗余 memcpy。
-
-### RTSP 推流
-
-板端启动 RTSP server，推流路径：
-
-```text
-rtsp://<board-ip>:8554/live
-```
-
-拉流示例：
+交叉编译依赖 RKNN Runtime、RGA、MPP、sysroot。`yolo_integration/Makefile` 里是原开发机路径，换环境先改。
 
 ```bash
-ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://192.168.1.20:8554/live
+cd yolo_integration
+make clean
+make
 ```
 
-## 编译说明
-
-本项目依赖 RK3566 / LubanCat 交叉编译环境和 Rockchip 相关 SDK：
-
-- RKNN Runtime
-- RGA
-- Rockchip MPP
-- TurboJPEG
-- stb_image
-- aarch64-linux-gnu 交叉编译工具链
-- 与板端匹配的 sysroot
-
-基础 RTSP 推流：
+无 YOLO 的基础推流：
 
 ```bash
 cd rtsp_streaming
 make -f Makefile.imx415
 ```
 
-YOLO 推流：
-
-```bash
-cd yolo_integration
-make
-```
-
-说明：`yolo_integration/Makefile` 中保留了原开发环境路径，迁移环境时需要修改 sysroot、RKNN Model Zoo、MPP、RGA 等路径。
-
-## 运行示例
-
-板端运行 YOLO + RTSP：
+## 运行
 
 ```bash
 cd /home/cat/latency_test
-LD_LIBRARY_PATH=/home/cat/latency_test ./imx415_yolo_rtsp_latency /dev/video0 /home/cat/latency_test/model/yolo11.rknn
+LD_LIBRARY_PATH=. \
+  ./imx415_yolo_rtsp /dev/video0 /home/cat/latency_test/model/yolo11.rknn
 ```
 
-PC / Ubuntu 拉流：
+拉流：
 
 ```bash
-ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://192.168.1.20:8554/live
+ffplay -fflags nobuffer -flags low_delay -framedrop \
+  -rtsp_transport tcp rtsp://192.168.1.20:8554/live
 ```
 
-## 延迟优化结果
+模型 `yolo11.rknn` MD5：`91faf3f5526db7ecfed3a61a99a3ef75`。
 
-原始基线：
+## 已测数字与本分支的关系
+
+下列数字来自 **S4**：1080p60、4 buffer、`latest_if_idle`、每 5 帧触发，**不是** 本分支默认的 `latest-pending` / 每 4 帧。本策略还没有同等 3×300 s 复测，不要把下面的 fps 说成本分支跑出来的。
 
 ```text
-端到端延迟：约 213-216 ms
+采集 60.000 fps
+编码输出约 58.75 fps
+检测更新约 11.75 fps
+采集时间戳 → 编码输出 P95 约 14.90 ms（板内，不是显示端到端）
 ```
 
-当前推荐版本：
+S0/S4 曾做 3×300 s RTSP TCP 拉流，解码错误与 RTP 序号空洞为 0。那是可播放性修复（FU-A 发送游标、有理数时间戳、周期 IDR）的回归，与 AI pending 策略无关。
 
-```text
-端到端延迟：约 71 ms
-```
-
-关键优化：
-
-- V4L2 buffer 数量从 4 调整为 2。
-- YOLO11n 每 3 帧推理一次，其余帧复用检测结果。
-- MPP H.264 编码改为低复杂度配置。
-- 去除冗余 memcpy。
-- RTSP RTP 包队列恢复合理大小，避免关键帧不完整。
-- 将串行链路改为采集线程与处理/编码/推流线程分离。
-- 多线程版本进一步采用 V4L2 buffer 直通交接，减少应用层帧池拷贝和旧帧等待。
-
-当前典型耗时：
-
-```text
-采集到应用层取帧：25-26 ms
-YOLO 每帧平均：28-29 ms
-YOLO 单次真实推理：85-88 ms
-MPP 编码：12 ms
-Sensor timestamp 到 RTSP 发送：约 71 ms
-```
-
-## NPU 频率分析
-
-当前发现 RK3566 NPU 默认运行在 600 MHz：
-
-```text
-cur_freq = 600000000
-max_freq = 900000000
-governor = rknpu_ondemand
-load = 100@600000000Hz
-```
-
-临时切换 performance 后可到 900 MHz，但当前 5V2A 电源下稳定性不足。后续建议更换 5V3A 电源后进行满频测试和 RKNN profiling。
+旧文档里的 1080p30、2 个 V4L2 buffer、每 3 帧同步推理、约 71 ms「端到端」，都是 2026-07 之前的基线。
 
 ## 文档
 
-完整项目说明见：
-
-```text
-docs/PROJECT_REPORT.md
-```
-
-其中包含驱动链路、V4L2 采集、YOLO11n 部署、RGA、MPP、RTSP、多线程优化、DMA-BUF、NPU 频率、量化说明、测试验证和简历表述建议。
-
-代码模块讲解与流程图见：
-
-```text
-docs/CODE_WALKTHROUGH.md
-```
-
-其中按 Sensor 驱动、设备树、V4L2 采集、YOLO 端侧部署、MPP 编码、RTSP 推流和低延迟优化拆分说明每部分做了什么、对应哪些代码、面试时应该怎么讲。
-
-## 后续方向
-
-- 更换 5V3A 电源，验证 NPU 900 MHz 满频性能。
-- 开启 RKNN profiling，确认是否存在 CPU fallback。
-- 尝试 YOLO11n 416x416 / 320x320 输入尺寸。
-- 评估 YOLOv5n / YOLOv6n 在 RK3566 上的推理性能。
-- 使用真实监控画面重新做 INT8 calibration。
-- 进一步探索 RGA blit 到编码 DMA-BUF，减少 CPU 整帧拷贝。
+- [docs/CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md) 模块讲解（已按当前分支更新链路说明）
+- [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) 项目长文；文首标明历史口径
+- `docs/*2026-07-10.md`、`LATENCY_BASELINE.md` 为当时 perf / 延迟快照，不是当前默认策略

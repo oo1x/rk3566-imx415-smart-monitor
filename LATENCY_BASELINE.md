@@ -1,5 +1,7 @@
 # Pipeline Latency Baseline 使用说明
 
+> 本文对应较早的分段打点程序。当前默认采集是 1080p60、4 buffer，主程序在 `yolo_integration/imx415_yolo_rtsp.cpp`，策略见根目录 [README.md](README.md)。
+
 本项目已在应用层加入 pipeline 分段耗时统计，不需要修改 IMX415 驱动，也不需要重新编译内核。统计口径是从 V4L2 DQBUF 后应用层拿到这一帧开始，到 RTSP 发送完成为止。
 
 ## 基础 RTSP 链路

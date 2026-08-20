@@ -2,21 +2,17 @@
 
 本文档用于说明本仓库中每个代码模块的作用、实现流程以及它在完整视频链路中的位置。它更偏向项目复盘和面试讲解，不是逐行源码注释。
 
+**当前代码（`latest-pending`）：** 1080p60、4 个 V4L2 DMA-BUF、视频线程与 AI 线程并行。默认 `latest-pending`：仅帧 0/4/8 拷贝 NV12 进单槽 pending；叠框 RGA 与 MPP 共用 V4L2 fd；AI 侧另一路 RGA 把副本缩成 640×640 RGB 再 `rknn_run`。仓库根目录 [README.md](../README.md) 是默认配置的权威说明。下文驱动/设备树部分仍然适用；采集 buffer 数量、抽帧策略以 README 为准，不要再按「2 buffer / 每 3 帧 / 71 ms 端到端」讲当前实现。
+
 ## 1. 项目整体链路
 
-本项目实现的是 RK3566 端侧视频采集、AI 推理、H.264 编码和 RTSP 推流链路。完整流程如下：
+本项目实现的是 RK3566 端侧视频采集、AI 推理、H.264 编码和 RTSP 推流链路。当前默认流程如下：
 
-```mermaid
-flowchart LR
-    A["IMX415 Sensor"] --> B["MIPI CSI-2"]
-    B --> C["RKISP / V4L2"]
-    C --> D["应用层 DQBUF 取帧"]
-    D --> E["RGA 图像预处理"]
-    E --> F["RKNN YOLO11n 推理"]
-    F --> G["检测框 / 越线结果叠加"]
-    G --> H["MPP H.264 硬件编码"]
-    H --> I["RTSP / RTP 推流"]
-    I --> J["ffplay 局域网预览"]
+```text
+IMX415 RAW10 → CSI → RKISP 1080p60 NV12
+  → 采集线程 DQBUF（4× dma-buf）
+  → 视频线程：到期帧 memcpy 到 pending → 叠框 RGA → MPP H.264 → QBUF → RTSP
+  → AI 线程（并行）：pending→work → 缩放 RGA → rknn_run → 发布框
 ```
 
 仓库代码按职责拆成三类：
@@ -114,14 +110,14 @@ flowchart TD
 
 面试讲法：
 
-> 应用层用 V4L2 标准接口取帧，先设置 NV12 1920x1080 格式，然后申请 mmap buffer，把内核 buffer 映射到用户态。每一帧通过 DQBUF 取出，处理完成后 QBUF 归还。为了降低旧帧排队，我把 V4L2 buffer 数量从 4 个减少到 2 个。
+> 应用层用 V4L2 标准接口取帧，设置 NV12 1920x1080，申请 mmap buffer 并 EXPBUF 导出 dma-buf fd。DQBUF 拿到帧，叠框和 MPP 编码共用这块 fd，编码完成后再 QBUF。当前默认是 4 个 buffer：2 个时 ISP 经常没排队 buffer 可写，采集会被应用拖到约 40 fps；4 个后采集回到 60 fps。
 
 重点理解：
 
 - `DQBUF` 表示应用层拿到一帧。
 - `QBUF` 表示应用层把 buffer 还给驱动继续采集。
-- buffer 太多会增加排队延迟，buffer 太少可能导致丢帧，需要根据链路耗时权衡。
-- 当前目标是低延迟预览，因此优先减少排队。
+- DMA-BUF 路径下必须等 MPP 用完再 QBUF，否则 ISP 会改正在编码的页。
+- buffer 太少丢采集，太多会堆旧帧；当前权衡是 4 个。
 
 ## 5. YOLO11n 端侧部署部分
 
@@ -134,7 +130,7 @@ flowchart TD
 - `yolo_integration/rknn_utils/image_utils.c`
 - `yolo_integration/rknn_utils/image_drawing.c`
 
-YOLO 部分使用 RK 官方转换好的 YOLO11n INT8 RKNN 模型，部署到 RK3566 NPU 上运行。应用层把 V4L2 取到的 NV12 图像通过 RGA 做 resize / letterbox，再送入 RKNN 执行推理，最后做阈值过滤和 NMS，得到检测框。
+YOLO 部分使用 RK 官方转换好的 YOLO11n INT8 RKNN 模型，部署到 RK3566 NPU 上运行。视频线程只在到期帧（默认每 4 帧）把 NV12 拷进 pending；AI 线程用缩放 RGA 做 letterbox（1080p NV12 → 640×640 RGB）写入 RKNN 输入 dma-buf，再 `rknn_run`。叠框是视频线程上另一路 RGA，写的是 V4L2 那块 1080p，不要和预处理缩放混成一次 RGA。
 
 ```mermaid
 flowchart TD
@@ -156,10 +152,10 @@ flowchart TD
 
 当前优化策略：
 
-- 使用 YOLO11n，属于 YOLO11 系列最轻量模型。
-- 使用 INT8 RKNN 模型，适合 RK3566 NPU。
-- 每 3 帧执行一次真实 YOLO 推理，其余帧复用最近一次检测结果。
-- 只保留项目需要的类别和后处理结果，减少无意义处理。
+- 使用 YOLO11n INT8 RKNN，适合 RK3566 NPU。
+- 默认 `latest-pending`：仅帧 0/4/8 拷贝；NPU 忙则覆盖单槽 pending，结束后立刻接着推。
+- 其余视频帧复用最近检测结果叠框，编码不等 NPU。
+- 可用 `PERF_SUBMIT_POLICY=latest_if_idle` 回到「忙则跳过、不预存」（S4 实测配置是间隔 5）。
 
 需要坦诚说明：
 
@@ -243,34 +239,25 @@ ffplay -fflags nobuffer -flags low_delay -framedrop rtsp://192.168.1.20:8554/liv
 
 最初链路是偏串行的：取帧、YOLO、画框、编码、推流都在一条主流程里执行。问题是某个环节耗时过高时，V4L2 buffer 会排队，应用层拿到的可能不是最新帧。
 
-优化后思路是把采集和处理解耦，尽量让采集线程快速拿到最新帧，处理线程负责推理、画框、编码和推流。
+优化后思路是把采集、视频（叠框/编码/推流）、AI 拆开。采集只负责 DQBUF 并交出最新帧；视频线程不等 NPU；AI 线程只处理到期拷贝进来的 NV12。
 
-```mermaid
-flowchart LR
-    subgraph T1["采集线程"]
-        A["select / DQBUF"] --> B["拿到最新 V4L2 buffer"]
-        B --> C["交给处理线程"]
-    end
+当前默认（见 README）：
 
-    subgraph T2["处理线程"]
-        D["RGA 预处理"] --> E["YOLO 抽帧推理"]
-        E --> F["画框 / 越线"]
-        F --> G["MPP 编码"]
-        G --> H["RTSP 发送"]
-    end
-
-    C --> D
-    H --> I["QBUF 归还 buffer"]
+```text
+采集线程  DQBUF → 最新帧指针给视频线程
+视频线程  到期 memcpy pending → 叠框 RGA → MPP → QBUF → RTSP
+AI 线程   pending→work → 缩放 RGA → rknn_run → 发布框
 ```
 
 面试讲法：
 
-> 延迟优化不是只看单个函数，而是看整条 pipeline。我的做法是先加时间戳统计，确认耗时主要来自 V4L2 排队和 YOLO 推理，然后分别处理：V4L2 减少 buffer 数量，YOLO 做抽帧推理，MPP 去掉冗余拷贝并降低编码复杂度，最后把采集和处理拆成多线程，减少旧帧堆积。
+> 延迟优化不是只看单个函数，而是看整条 pipeline。采集和编码走 4 个 DMA-BUF，叠框和 MPP 共用 fd，编码完再 QBUF。YOLO 大约 65 ms 一次，不能同步挡 16.7 ms 的视频拍；所以只按每 4 帧拷一份进 pending，NPU 忙就覆盖这一张，推完立刻接着用。旧版 2 个 buffer 会把采集拖到约 40 fps，4 个才回到 60。
 
-优化结果：
+历史优化结果（2026-07 同步/30fps 口径，不是当前默认）：
 
 - 初始端到端延迟约 213 到 216 ms。
-- 优化后典型端到端延迟约 71 ms。
+- 当时多线程版本约 71 ms（含到 RTSP 发送，不是显示端到端）。
+- 当前板内「采集时间戳→编码输出」P95 约 15 ms，来自 S4 实测配置，见 README。
 - 编码部分耗时已经降到较低水平，主要优化空间集中在模型推理、帧排队和客户端播放缓冲。
 
 ## 9. 代码和能力对应关系
@@ -283,13 +270,15 @@ flowchart LR
 | H.264 编码 | `rtsp_streaming/mpp_encoder.c` | MPP encoder、NV12 输入、H.264 packet 输出 |
 | RTSP 推流 | `rtsp_streaming/rtsp_demo.c`、`rtsp_streaming/rtp_enc.c` | RTSP session、RTP 打包、ffplay 验证 |
 | YOLO 部署 | `yolo_integration/imx415_yolo_rtsp.cpp`、`rknn_yolo11/` | RKNN 模型加载、RGA 预处理、NPU 推理、后处理 |
-| 低延迟优化 | `yolo_integration/imx415_yolo_rtsp.cpp` | 时间戳统计、抽帧推理、减少 buffer 排队、多线程 |
+| 低延迟优化 | `yolo_integration/imx415_yolo_rtsp.cpp` | Frame ID、4 DMA-BUF、latest-pending、周期 IDR / RTP 游标 |
 
 ## 10. 简历上建议怎么写
 
-推荐写法：
+推荐写法（数字用已测配置，并说清边界）：
 
-> 基于 RK3566 + IMX415 构建端侧智能监控视频链路，完成 IMX415 V4L2 subdev 驱动适配、V4L2 采集、RKNN YOLO11n 端侧部署、MPP H.264 硬件编码与 RTSP 推流；通过 pipeline 分段打点定位延迟瓶颈，采用 V4L2 buffer 缩减、YOLO 抽帧推理、编码配置优化和多线程解耦，将端到端延迟由约 213 ms 降低至约 71 ms。
+> 基于 RK3566 + IMX415 打通 1080p60 V4L2 / DMA-BUF / MPP / RTSP；YOLO 与视频线程解耦，到期帧拷入单槽 pending。S4 实测采集 60 fps、编码约 58.7 fps，采集时间戳到编码输出 P95 约 14.9 ms（板内，非显示端到端）。
+
+不要把 213→71 ms 当作当前默认实现。那是更早的 30 fps 同步链路口径。
 
 面试时建议主动强调：
 

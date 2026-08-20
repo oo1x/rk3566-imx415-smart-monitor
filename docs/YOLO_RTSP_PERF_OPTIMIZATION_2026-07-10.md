@@ -1,5 +1,7 @@
 # YOLO and RTSP Performance Optimization Notes
 
+> Historical snapshot from **2026-07-10**. Current defaults (1080p60, 4 DMA-BUF, `latest-pending` every 4 frames) are in the root [README.md](../README.md).
+
 Date: 2026-07-10
 
 This document records the baseline implementation, perf hotspots, optimization changes, and follow-up directions for the RK3566 + IMX415 + YOLO11 + RTSP demo.
