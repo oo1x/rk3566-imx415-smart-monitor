@@ -632,7 +632,9 @@ static int handoff_get_fresh(handoff_queue_t *q, handoff_frame_t *out)
     struct timespec ts;
     pthread_mutex_lock(&q->mutex);
 
-    handoff_drop_ready_locked(q);
+    /* Take the latest waiting frame if capture already deposited one.
+     * Capture still overwrites the single ready slot; dropping here would
+     * throw away that frame and wait another 16.7 ms after a late encode. */
     while (g_running && !q->has_ready) {
         make_realtime_timeout(&ts, 100);
         pthread_cond_timedwait(&q->cond, &q->mutex, &ts);

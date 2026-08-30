@@ -119,7 +119,19 @@ ffplay -fflags nobuffer -flags low_delay -framedrop \
 
 ## 已测数字与本分支的关系
 
-下列数字来自 **S4**：1080p60、4 buffer、`latest_if_idle`、每 5 帧触发，**不是** 本分支默认的 `latest-pending` / 每 4 帧。本策略还没有同等 3×300 s 复测，不要把下面的 fps 说成本分支跑出来的。
+本分支当前默认（`latest-pending` + 方案 A，300 s，2026-08-30）：
+
+```text
+采集 60.000 fps
+编码输出 60.000 fps
+检测更新 15.000 fps
+板端视频丢帧 0
+```
+
+交接说明（优化前 / 改了什么 / 最终结果，给 Codex 读）：  
+[docs/CODEX_NOTE_SCHEME_A_ENCODE_60FPS_20260830.md](docs/CODEX_NOTE_SCHEME_A_ENCODE_60FPS_20260830.md)
+
+下列数字来自 **7 月正式 S4**：1080p60、4 buffer、`latest_if_idle`、每 5 帧触发，**不是** 本分支默认的 `latest-pending` / 每 4 帧。不要把下面的 fps 说成本分支当前结果。
 
 ```text
 采集 60.000 fps
@@ -134,6 +146,7 @@ S0/S4 曾做 3×300 s RTSP TCP 拉流，解码错误与 RTP 序号空洞为 0。
 
 ## 文档
 
+- [docs/CODEX_NOTE_SCHEME_A_ENCODE_60FPS_20260830.md](docs/CODEX_NOTE_SCHEME_A_ENCODE_60FPS_20260830.md) 方案 A：编码 60 fps 交接说明（Codex 先读这篇）
 - [docs/CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md) 模块讲解（已按当前分支更新链路说明）
 - [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) 项目长文；文首标明历史口径
 - `docs/*2026-07-10.md`、`LATENCY_BASELINE.md` 为当时 perf / 延迟快照，不是当前默认策略
